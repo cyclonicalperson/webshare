@@ -3,6 +3,7 @@ let pc, dataChannel;
 let fileInput = document.getElementById('fileInput');
 let sendBtn = document.getElementById('sendBtn');
 let roomId;
+let receivedMeta = null;
 
 ws.onmessage = async (event) => {
     const { type, payload } = JSON.parse(event.data);
@@ -55,19 +56,35 @@ async function createPeer(initiator) {
 function setupDataChannel() {
     dataChannel.onopen = () => console.log('DataChannel open');
     dataChannel.onmessage = (e) => {
-        const blob = new Blob([e.data]);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'received_file';
-        a.click();
+        if (typeof e.data === 'string') {
+            // Metadata (filename and type)
+            try {
+                receivedMeta = JSON.parse(e.data);
+            } catch (err) {
+                console.error('Failed to parse metadata:', err);
+            }
+        } else if (receivedMeta) {
+            const blob = new Blob([e.data], { type: receivedMeta.type });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = receivedMeta.name || 'received_file';
+            a.click();
+            receivedMeta = null;
+        }
     };
 
     sendBtn.onclick = () => {
         const file = fileInput.files[0];
         if (!file) return alert('Choose a file first');
+
+        // First send metadata
+        dataChannel.send(JSON.stringify({ name: file.name, type: file.type }));
+
+        // Then send file as Blob
         dataChannel.send(file);
     };
+
 
     document.getElementById('chooseFileBtn').onclick = () => {
         fileInput.click();
