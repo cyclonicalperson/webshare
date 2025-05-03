@@ -1,4 +1,4 @@
-const ws = new WebSocket('ws://localhost:3000');
+const ws = new WebSocket('https://webshare-8jx3.onrender.com');
 let pc, dataChannel;
 let fileInput = document.getElementById('fileInput');
 let sendBtn = document.getElementById('sendBtn');

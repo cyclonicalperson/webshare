@@ -1,40 +1,32 @@
+const http = require('http');
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
 
-const wss = new WebSocket.Server({ port: 3000 });
-const rooms = new Map();
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
+
+const rooms = {};
 
 wss.on('connection', (ws) => {
-    ws.on('message', (data) => {
-        const msg = JSON.parse(data);
-        const { type, room, payload } = msg;
+    ws.on('message', (message) => {
+        const { type, room, payload } = JSON.parse(message);
+        if (!rooms[room]) rooms[room] = [];
+        if (!rooms[room].includes(ws)) rooms[room].push(ws);
 
-        if (type === 'join') {
-            ws.room = room;
-            if (!rooms.has(room)) rooms.set(room, []);
-            rooms.get(room).push(ws);
-            console.log(`User joined room: ${room}`);
-        }
-
-        // Relay messages to other clients in the same room
-        if (['offer', 'answer', 'ice'].includes(type)) {
-            const peers = rooms.get(room) || [];
-            peers.forEach((peer) => {
-                if (peer !== ws) peer.send(JSON.stringify({ type, payload }));
-            });
-        }
+        rooms[room].forEach(client => {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({ type, payload }));
+            }
+        });
     });
 
     ws.on('close', () => {
-        if (ws.room && rooms.has(ws.room)) {
-            const updated = rooms.get(ws.room).filter((peer) => peer !== ws);
-            if (updated.length) {
-                rooms.set(ws.room, updated);
-            } else {
-                rooms.delete(ws.room);
-            }
+        for (const room in rooms) {
+            rooms[room] = rooms[room].filter(client => client !== ws);
         }
     });
 });
 
-console.log('WebSocket signaling server running on ws://localhost:3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`WebSocket server running on port ${PORT}`);
+});
