@@ -1,4 +1,4 @@
-const ws = new WebSocket('https://webshare-8jx3.onrender.com');
+const ws = new WebSocket('primary-tove-arsenijevicdev-4f187706.koyeb.app/');
 let pc, dataChannel;
 let fileInput = document.getElementById('fileInput');
 let sendBtn = document.getElementById('sendBtn');
