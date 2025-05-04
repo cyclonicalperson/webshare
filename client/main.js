@@ -4,6 +4,7 @@ let fileInput = document.getElementById('fileInput');
 let sendBtn = document.getElementById('sendBtn');
 let roomId;
 let receivedMeta = null;
+let receivedChunks = [];
 
 ws.onmessage = async (event) => {
     const { type, payload } = JSON.parse(event.data);
@@ -54,37 +55,69 @@ async function createPeer(initiator) {
 }
 
 function setupDataChannel() {
+    receivedChunks = [];
+
     dataChannel.onopen = () => console.log('DataChannel open');
+
     dataChannel.onmessage = (e) => {
         if (typeof e.data === 'string') {
-            // Metadata (filename and type)
-            try {
-                receivedMeta = JSON.parse(e.data);
-            } catch (err) {
-                console.error('Failed to parse metadata:', err);
+            if (e.data === '__END__') {
+                // Reconstruct file from collected chunks
+                const blob = new Blob(receivedChunks, { type: receivedMeta?.type || '' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = receivedMeta?.name || 'received_file';
+                a.click();
+
+                console.log('File received and saved.');
+                receivedChunks = [];
+                receivedMeta = null;
+            } else {
+                try {
+                    receivedMeta = JSON.parse(e.data);
+                    receivedChunks = []; // reset for new file
+                    console.log('Receiving:', receivedMeta.name);
+                } catch (err) {
+                    console.error('Failed to parse metadata:', err);
+                }
             }
-        } else if (receivedMeta) {
-            const blob = new Blob([e.data], { type: receivedMeta.type });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = receivedMeta.name || 'received_file';
-            a.click();
-            receivedMeta = null;
+        } else {
+            receivedChunks.push(e.data);
         }
     };
 
-    sendBtn.onclick = () => {
+    sendBtn.onclick = async () => {
         const file = fileInput.files[0];
         if (!file) return alert('Choose a file first');
 
-        // First send metadata
-        dataChannel.send(JSON.stringify({ name: file.name, type: file.type }));
+        // Send metadata
+        dataChannel.send(JSON.stringify({
+            name: file.name,
+            type: file.type,
+            size: file.size
+        }));
 
-        // Then send file as Blob
-        dataChannel.send(file);
+        const chunkSize = 16 * 1024; // 16 KB
+        const stream = file.stream();
+        const reader = stream.getReader();
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Flow control: wait until the buffer is not too full
+            while (dataChannel.bufferedAmount > 4 * chunkSize) {
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+
+            dataChannel.send(value);
+        }
+
+        // After finishing all chunks:
+        dataChannel.send("__END__");
+        console.log('File sent successfully.');
     };
-
 
     document.getElementById('chooseFileBtn').onclick = () => {
         fileInput.click();
