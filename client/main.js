@@ -1,4 +1,4 @@
-const ws = new WebSocket('primary-tove-arsenijevicdev-4f187706.koyeb.app/');
+const ws = new WebSocket('wss://primary-tove-arsenijevicdev-4f187706.koyeb.app/');
 let pc, dataChannel;
 let fileInput = document.getElementById('fileInput');
 let sendBtn = document.getElementById('sendBtn');
