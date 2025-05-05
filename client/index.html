@@ -3,21 +3,52 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>PeerDrop</title>
-  <link rel="stylesheet" href="styles.css" />
+  <title>WebShare</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #111;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem;
+    }
+
+    input, button {
+      margin: 0.5rem;
+      padding: 0.5rem;
+    }
+
+    #roomDisplay, #status {
+      margin-top: 1rem;
+      font-weight: bold;
+    }
+
+    progress {
+      width: 100%;
+      margin-top: 1rem;
+    }
+  </style>
 </head>
 <body>
-<h1>PeerDrop</h1>
-<label for="roomInput"><input type="text" id="roomInput" placeholder="Enter room ID" /></label>
-<button id="joinBtn">Join Room</button>
-<input type="file" id="fileInput" style="display: none;" />
-<button id="chooseFileBtn">Choose File</button>
-<span id="fileName"></span>
-<button id="sendBtn" disabled>Send File</button>
-<script src="main.js"></script>
-<div id="progressContainer">
-  <label>Sending: <progress id="sendProgress" value="0" max="1"></progress></label>
-  <label>Receiving: <progress id="recvProgress" value="0" max="1"></progress></label>
+<h1>WebShare: P2P File Sharing</h1>
+
+<div>
+  <label for="roomInput"></label><input type="text" id="roomInput" placeholder="Room ID" />
+  <button id="joinRoomBtn">Join Room</button>
 </div>
+
+<div id="roomDisplay">Room: (not joined)</div>
+
+<div>
+  <input type="file" id="fileInput" />
+  <button id="sendBtn">Send File</button>
+</div>
+
+<progress id="progressBar" value="0" max="100" style="display: none;"></progress>
+<div id="status">Connecting...</div>
+
+<script src="main.js"></script>
 </body>
 </html>
