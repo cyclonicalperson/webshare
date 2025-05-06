@@ -11,6 +11,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let pc;
     let dc;
     let connectedPeers = 0;
+    let currentRoom = "";
 
     const MAX_RETRIES = 5;
     let retryCount = 0;
@@ -37,19 +38,22 @@ document.addEventListener("DOMContentLoaded", () => {
         ws.onmessage = async (message) => {
             const data = JSON.parse(message.data);
 
-            if (data.type === "joined") {
-                roomDisplay.textContent = `Room: ${data.room}`;
-                connectedPeers = data.count;
+            if (data.type === "room_info") {
+                currentRoom = data.room;
+                connectedPeers = data.clients;
                 updateRoomDisplay();
-                createPeerConnection();
 
-                if (data.initiator) {
-                    dc = pc.createDataChannel("file");
-                    setupDataChannel(dc);
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    ws.send(JSON.stringify({ type: "offer", offer }));
+                if (!pc) {
+                    createPeerConnection();
+                    if (connectedPeers === 2) {
+                        dc = pc.createDataChannel("file");
+                        setupDataChannel(dc);
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                    }
                 }
+
             } else if (data.type === "offer") {
                 await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
                 dc = await new Promise(resolve => {
@@ -58,7 +62,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 setupDataChannel(dc);
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-                ws.send(JSON.stringify({ type: "answer", answer }));
+                ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
 
             } else if (data.type === "answer") {
                 await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -69,10 +73,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 } catch (err) {
                     console.error("Failed to add ICE candidate:", err);
                 }
-
-            } else if (data.type === "room-update") {
-                connectedPeers = data.count;
-                updateRoomDisplay();
             }
         };
     }
@@ -88,12 +88,22 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function createPeerConnection() {
-        pc = new RTCPeerConnection();
+        pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        });
 
         pc.onicecandidate = ({ candidate }) => {
             if (candidate) {
-                ws.send(JSON.stringify({ type: "ice-candidate", candidate }));
+                ws.send(JSON.stringify({ type: "ice-candidate", candidate, room: currentRoom }));
             }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            console.log("ICE state:", pc.iceConnectionState);
+        };
+
+        pc.onconnectionstatechange = () => {
+            console.log("Connection state:", pc.connectionState);
         };
     }
 
@@ -104,7 +114,12 @@ document.addEventListener("DOMContentLoaded", () => {
         let receivedSize = 0;
 
         channel.onopen = () => {
+            console.log("DataChannel opened");
             status.textContent = "Peer connected.";
+        };
+
+        channel.onerror = (e) => {
+            console.error("DataChannel error:", e);
         };
 
         channel.onmessage = (e) => {
@@ -136,18 +151,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     joinRoomBtn.onclick = () => {
         const room = roomInput.value.trim();
-        if (!room) return;
-
-        const tryJoin = () => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "join", room }));
-            } else {
-                status.textContent = "Waiting for WebSocket to open...";
-                setTimeout(tryJoin, 500);
-            }
-        };
-
-        tryJoin();
+        if (room && ws.readyState === WebSocket.OPEN) {
+            currentRoom = room;
+            ws.send(JSON.stringify({ type: "join", room }));
+        }
     };
 
     sendBtn.onclick = () => {
@@ -162,33 +169,31 @@ document.addEventListener("DOMContentLoaded", () => {
         const chunkSize = 64 * 1024;
         let offset = 0;
 
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            dc.send(e.target.result);
-            offset += e.target.result.byteLength;
-            progressBar.style.display = "block";
-            progressBar.value = (offset / file.size) * 100;
+        function readSlice(offset) {
+            const slice = file.slice(offset, offset + chunkSize);
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                dc.send(e.target.result);
+                offset += e.target.result.byteLength;
+                progressBar.style.display = "block";
+                progressBar.value = (offset / file.size) * 100;
 
-            if (offset < file.size) {
-                readSlice(offset);
-            } else {
-                status.textContent = "File sent.";
-                progressBar.style.display = "none";
-                progressBar.value = 0;
-            }
-        };
-
-        const readSlice = (o) => {
-            const slice = file.slice(o, o + chunkSize);
+                if (offset < file.size) {
+                    readSlice(offset);
+                } else {
+                    status.textContent = "File sent.";
+                    progressBar.style.display = "none";
+                    progressBar.value = 0;
+                }
+            };
             reader.readAsArrayBuffer(slice);
-        };
+        }
 
         readSlice(0);
     };
 
     function updateRoomDisplay() {
-        const room = roomInput.value.trim();
-        roomDisplay.textContent = `Room: ${room} | Peers: ${connectedPeers}`;
+        roomDisplay.textContent = `Room: ${currentRoom} | Peers: ${connectedPeers}`;
     }
 
     connectWebSocket();
