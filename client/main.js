@@ -26,7 +26,7 @@ document.addEventListener("DOMContentLoaded", () => {
         isReconnecting = true;
         status.textContent = "Connecting to signaling server...";
         console.log("Attempting WebSocket connection...");
-        ws = new WebSocket("ws://localhost:3000");
+        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app");
 
         ws.onopen = () => {
             retryCount = 0;
