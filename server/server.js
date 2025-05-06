@@ -1,16 +1,16 @@
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: process.env.PORT || 3000 });
 
-const rooms = new Map(); // roomId => Set of clients
-const clientRoom = new Map(); // ws => roomId
+const rooms = new Map();
+const clientRoom = new Map();
 
 function broadcastRoomInfo(roomId) {
     const clients = rooms.get(roomId);
     if (!clients) return;
     const message = JSON.stringify({
-        type: 'room_info',
+        type: 'room-update',
         room: roomId,
-        clients: clients.size,
+        count: clients.size,
     });
     for (const client of clients) {
         if (client.readyState === WebSocket.OPEN) {
@@ -45,23 +45,31 @@ wss.on('connection', (ws) => {
             const roomId = msg.room;
             if (!roomId) return;
 
-            // Remove from previous room if exists
             const prevRoom = clientRoom.get(ws);
             if (prevRoom && rooms.has(prevRoom)) {
                 rooms.get(prevRoom).delete(ws);
                 broadcastRoomInfo(prevRoom);
             }
 
-            // Add to new room
             if (!rooms.has(roomId)) rooms.set(roomId, new Set());
             rooms.get(roomId).add(ws);
             clientRoom.set(ws, roomId);
+
+            const clients = rooms.get(roomId);
+            const initiator = clients.size === 1;
+
+            ws.send(JSON.stringify({
+                type: 'joined',
+                room: roomId,
+                count: clients.size,
+                initiator
+            }));
+
             broadcastRoomInfo(roomId);
             return;
         }
 
-        // Forward offer/answer/ice only to other clients in the room
-        if (msg.offer || msg.answer || msg.ice) {
+        if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice-candidate') {
             forwardToRoom(ws, msg);
         }
     });

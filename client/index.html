@@ -18,9 +18,10 @@
     input, button {
       margin: 0.5rem;
       padding: 0.5rem;
+      font-size: 1rem;
     }
 
-    #roomDisplay, #status {
+    #roomDisplay, #status, #peerInfo {
       margin-top: 1rem;
       font-weight: bold;
     }
@@ -28,6 +29,12 @@
     progress {
       width: 100%;
       margin-top: 1rem;
+      height: 20px;
+    }
+
+    #progressContainer {
+      width: 100%;
+      max-width: 500px;
     }
   </style>
 </head>
@@ -40,13 +47,17 @@
 </div>
 
 <div id="roomDisplay">Room: (not joined)</div>
+<div id="peerInfo">Peers: 0</div>
 
 <div>
   <input type="file" id="fileInput" />
   <button id="sendBtn">Send File</button>
 </div>
 
-<progress id="progressBar" value="0" max="100" style="display: none;"></progress>
+<div id="progressContainer">
+  <progress id="progressBar" value="0" max="100" style="display: none;"></progress>
+</div>
+
 <div id="status">Connecting...</div>
 
 <script src="main.js"></script>

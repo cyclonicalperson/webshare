@@ -1,168 +1,195 @@
-const statusEl = document.getElementById('status');
-const roomDisplay = document.getElementById('roomDisplay');
-const progressBar = document.getElementById('progressBar');
-const fileInput = document.getElementById('fileInput');
-const sendBtn = document.getElementById('sendBtn');
-const joinRoomBtn = document.getElementById('joinRoomBtn');
-const roomInput = document.getElementById('roomInput');
+document.addEventListener("DOMContentLoaded", () => {
+    const roomInput = document.getElementById("roomInput");
+    const joinRoomBtn = document.getElementById("joinRoomBtn");
+    const roomDisplay = document.getElementById("roomDisplay");
+    const fileInput = document.getElementById("fileInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const progressBar = document.getElementById("progressBar");
+    const status = document.getElementById("status");
 
-let ws;
-let roomId = '';
-let retryCount = 0;
-const MAX_RETRIES = 5;
+    let ws;
+    let pc;
+    let dc;
+    let connectedPeers = 0;
 
-let peerConnection;
-let dataChannel;
-let receivedMeta = null;
-let incomingBuffer = [];
-let receivedBytes = 0;
-let expectedSize = 0;
+    const MAX_RETRIES = 5;
+    let retryCount = 0;
 
-joinRoomBtn.onclick = () => {
-    const input = roomInput.value.trim();
-    if (!input) return alert('Enter a room ID first!');
-    roomId = input;
-    connectWebSocket();
-};
+    function connectWebSocket() {
+        status.textContent = "Connecting...";
+        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app/");
 
-function updateStatus(text, success = false) {
-    statusEl.textContent = text;
-    statusEl.style.color = success ? 'limegreen' : 'orange';
-}
+        ws.onopen = () => {
+            retryCount = 0;
+            status.textContent = "Connected to signaling server.";
+        };
 
-function updateRoomDisplay(count = null) {
-    let msg = `Room: ${roomId}`;
-    if (count !== null) msg += ` | Users: ${count}`;
-    roomDisplay.textContent = msg;
-}
+        ws.onerror = (err) => {
+            console.error("WebSocket error:", err);
+            retryConnection();
+        };
 
-function connectWebSocket() {
-    ws = new WebSocket('wss://primary-tove-arsenijevicdev-4f187706.koyeb.app/');
+        ws.onclose = () => {
+            console.warn("WebSocket closed.");
+            retryConnection();
+        };
 
-    ws.onopen = () => {
-        updateStatus('Connected to signaling server', true);
-        retryCount = 0;
-        ws.send(JSON.stringify({ type: 'join', room: roomId }));
-        initializePeer();
-    };
+        ws.onmessage = async (message) => {
+            const data = JSON.parse(message.data);
 
-    ws.onclose = () => {
-        updateStatus('Disconnected. Retrying...');
-        if (retryCount < MAX_RETRIES) {
-            setTimeout(connectWebSocket, 1000 * (retryCount + 1));
-            retryCount++;
-        } else {
-            updateStatus('Failed to connect. Please refresh.');
-        }
-    };
+            if (data.type === "joined") {
+                roomDisplay.textContent = `Room: ${data.room}`;
+                connectedPeers = data.count;
+                updateRoomDisplay();
+                createPeerConnection();
 
-    ws.onerror = (e) => {
-        console.error('WebSocket error:', e);
-        ws.close();
-    };
+                if (data.initiator) {
+                    dc = pc.createDataChannel("file");
+                    setupDataChannel(dc);
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ type: "offer", offer }));
+                }
+            } else if (data.type === "offer") {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                dc = await new Promise(resolve => {
+                    pc.ondatachannel = e => resolve(e.channel);
+                });
+                setupDataChannel(dc);
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                ws.send(JSON.stringify({ type: "answer", answer }));
 
-    ws.onmessage = async (event) => {
-        const message = JSON.parse(event.data);
+            } else if (data.type === "answer") {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
 
-        if (message.type === 'room_info') {
-            updateRoomDisplay(message.clients);
-        }
+            } else if (data.type === "ice-candidate") {
+                try {
+                    await pc.addIceCandidate(data.candidate);
+                } catch (err) {
+                    console.error("Failed to add ICE candidate:", err);
+                }
 
-        if (message.answer) {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
-        } else if (message.offer) {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            ws.send(JSON.stringify({ answer }));
-        } else if (message.ice) {
-            peerConnection.addIceCandidate(new RTCIceCandidate(message.ice));
-        }
-    };
-}
-
-function initializePeer() {
-    peerConnection = new RTCPeerConnection();
-
-    peerConnection.onicecandidate = ({ candidate }) => {
-        if (candidate) {
-            ws.send(JSON.stringify({ ice: candidate }));
-        }
-    };
-
-    dataChannel = peerConnection.createDataChannel('file');
-    setupDataChannel();
-
-    peerConnection.createOffer().then(offer => {
-        peerConnection.setLocalDescription(offer);
-        ws.send(JSON.stringify({ offer }));
-    });
-
-    peerConnection.ondatachannel = (event) => {
-        dataChannel = event.channel;
-        setupDataChannel();
-    };
-}
-
-function setupDataChannel() {
-    dataChannel.onopen = () => {
-        updateStatus('Peer connection established', true);
-    };
-
-    dataChannel.onmessage = (e) => {
-        if (typeof e.data === 'string') {
-            receivedMeta = JSON.parse(e.data);
-            expectedSize = receivedMeta.size || 0;
-            incomingBuffer = [];
-            receivedBytes = 0;
-            progressBar.style.display = 'block';
-            progressBar.value = 0;
-        } else if (receivedMeta) {
-            incomingBuffer.push(e.data);
-            receivedBytes += e.data.byteLength;
-            progressBar.value = (receivedBytes / expectedSize) * 100;
-
-            if (receivedBytes >= expectedSize) {
-                const blob = new Blob(incomingBuffer, { type: receivedMeta.type });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = receivedMeta.name || 'received_file';
-                a.click();
-                receivedMeta = null;
-                progressBar.style.display = 'none';
+            } else if (data.type === "room-update") {
+                connectedPeers = data.count;
+                updateRoomDisplay();
             }
-        }
-    };
-}
-
-sendBtn.onclick = () => {
-    const file = fileInput.files[0];
-    if (!file || !dataChannel || dataChannel.readyState !== 'open') {
-        alert('Connection not ready or file not selected');
-        return;
+        };
     }
 
-    const chunkSize = 64 * 1024;
-    const totalChunks = Math.ceil(file.size / chunkSize);
-    let offset = 0;
-
-    dataChannel.send(JSON.stringify({ name: file.name, type: file.type, size: file.size }));
-    progressBar.style.display = 'block';
-    progressBar.value = 0;
-
-    function sendChunk() {
-        const slice = file.slice(offset, offset + chunkSize);
-        dataChannel.send(slice);
-        offset += chunkSize;
-        progressBar.value = (offset / file.size) * 100;
-
-        if (offset < file.size) {
-            setTimeout(sendChunk, 10);
+    function retryConnection() {
+        if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            status.textContent = `Reconnecting... (${retryCount})`;
+            setTimeout(connectWebSocket, 1000 * retryCount);
         } else {
-            console.log('File sent successfully');
+            status.textContent = "Failed to connect.";
         }
     }
 
-    sendChunk();
-};
+    function createPeerConnection() {
+        pc = new RTCPeerConnection();
+
+        pc.onicecandidate = ({ candidate }) => {
+            if (candidate) {
+                ws.send(JSON.stringify({ type: "ice-candidate", candidate }));
+            }
+        };
+    }
+
+    function setupDataChannel(channel) {
+        channel.binaryType = "arraybuffer";
+        let receivedBuffers = [];
+        let totalSize = 0;
+        let receivedSize = 0;
+
+        channel.onopen = () => {
+            status.textContent = "Peer connected.";
+        };
+
+        channel.onmessage = (e) => {
+            if (typeof e.data === "string" && e.data.startsWith("file-meta:")) {
+                const [, name, size] = e.data.split(":");
+                totalSize = parseInt(size);
+                receivedBuffers = [];
+                receivedSize = 0;
+                status.textContent = `Receiving: ${name}`;
+            } else {
+                receivedBuffers.push(e.data);
+                receivedSize += e.data.byteLength;
+                progressBar.style.display = "block";
+                progressBar.value = (receivedSize / totalSize) * 100;
+
+                if (receivedSize >= totalSize) {
+                    const blob = new Blob(receivedBuffers);
+                    const a = document.createElement("a");
+                    a.href = URL.createObjectURL(blob);
+                    a.download = "downloaded_file";
+                    a.click();
+                    progressBar.style.display = "none";
+                    progressBar.value = 0;
+                    status.textContent = "File received.";
+                }
+            }
+        };
+    }
+
+    joinRoomBtn.onclick = () => {
+        const room = roomInput.value.trim();
+        if (!room) return;
+
+        const tryJoin = () => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "join", room }));
+            } else {
+                status.textContent = "Waiting for WebSocket to open...";
+                setTimeout(tryJoin, 500);
+            }
+        };
+
+        tryJoin();
+    };
+
+    sendBtn.onclick = () => {
+        if (!dc || dc.readyState !== "open") {
+            alert("DataChannel not open.");
+            return;
+        }
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        dc.send(`file-meta:${file.name}:${file.size}`);
+        const chunkSize = 64 * 1024;
+        let offset = 0;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            dc.send(e.target.result);
+            offset += e.target.result.byteLength;
+            progressBar.style.display = "block";
+            progressBar.value = (offset / file.size) * 100;
+
+            if (offset < file.size) {
+                readSlice(offset);
+            } else {
+                status.textContent = "File sent.";
+                progressBar.style.display = "none";
+                progressBar.value = 0;
+            }
+        };
+
+        const readSlice = (o) => {
+            const slice = file.slice(o, o + chunkSize);
+            reader.readAsArrayBuffer(slice);
+        };
+
+        readSlice(0);
+    };
+
+    function updateRoomDisplay() {
+        const room = roomInput.value.trim();
+        roomDisplay.textContent = `Room: ${room} | Peers: ${connectedPeers}`;
+    }
+
+    connectWebSocket();
+});
