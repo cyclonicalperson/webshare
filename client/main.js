@@ -16,21 +16,29 @@ document.addEventListener("DOMContentLoaded", () => {
     const MAX_RETRIES = 5;
     let retryCount = 0;
     let pendingIceCandidates = [];
-    let isReconnecting = false; // Prevent multiple simultaneous reconnections
+    let isReconnecting = false;
+    const CHUNK_SIZE = 131072; // 128KB chunks
+    const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
+    const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
 
     function connectWebSocket() {
         if (isReconnecting) return;
         isReconnecting = true;
         status.textContent = "Connecting to signaling server...";
         console.log("Attempting WebSocket connection...");
-        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app");
+        ws = new WebSocket("ws://localhost:3000");
 
         ws.onopen = () => {
             retryCount = 0;
             isReconnecting = false;
             status.textContent = "Connected to signaling server.";
             console.log("WebSocket connection established.");
-            // Re-join the room if previously in one
+            setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "ping" }));
+                    console.log("Sent ping");
+                }
+            }, 30000);
             if (currentRoom) {
                 console.log(`Re-joining room: ${currentRoom}`);
                 ws.send(JSON.stringify({ type: "join", room: currentRoom }));
@@ -54,6 +62,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 console.log("Received message:", data);
 
                 switch (data.type) {
+                    case "pong":
+                        console.log("Received pong from server");
+                        break;
+
                     case "joined":
                         console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
                         currentRoom = data.room;
@@ -61,7 +73,6 @@ document.addEventListener("DOMContentLoaded", () => {
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        // Only reset PeerConnection if not already connected
                         if (!pc || pc.connectionState !== "connected") {
                             cleanupPeerConnection();
                             createPeerConnection();
@@ -161,7 +172,7 @@ document.addEventListener("DOMContentLoaded", () => {
         retryCount++;
         status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
         console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(connectWebSocket, 2000 * retryCount); // Exponential backoff
+        setTimeout(connectWebSocket, 2000 * retryCount);
     }
 
     function createPeerConnection() {
@@ -170,6 +181,8 @@ document.addEventListener("DOMContentLoaded", () => {
             iceServers: [
                 { urls: "stun:stun.l.google.com:19302" },
                 { urls: "stun:stun1.l.google.com:19302" }
+                // Add TURN server if needed for better connectivity:
+                // { urls: "turn:your.turn.server", username: "user", credential: "pass" }
             ]
         });
 
@@ -213,6 +226,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         pendingIceCandidates = [];
         sendBtn.disabled = true;
+        progressBar.style.display = "none";
+        progressBar.value = 0;
         console.log("Cleaned up PeerConnection and DataChannel.");
     }
 
@@ -220,6 +235,9 @@ document.addEventListener("DOMContentLoaded", () => {
         dc = channel;
         dc.binaryType = "arraybuffer";
         let receivedMeta = null;
+        let receivedChunks = [];
+        let receivedSize = 0;
+        let lastProgress = 0;
 
         dc.onopen = () => {
             console.log("DataChannel is open!");
@@ -233,25 +251,46 @@ document.addEventListener("DOMContentLoaded", () => {
                 try {
                     receivedMeta = JSON.parse(e.data);
                     console.log("Received file metadata:", receivedMeta);
+                    receivedChunks = [];
+                    receivedSize = 0;
+                    lastProgress = 0;
+                    progressBar.style.display = "block";
+                    progressBar.value = 0;
                 } catch (err) {
                     console.error("Failed to parse metadata:", err);
                 }
             } else if (receivedMeta) {
-                const blob = new Blob([e.data], { type: receivedMeta.type });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = receivedMeta.name || "received_file";
-                a.click();
-                URL.revokeObjectURL(url);
-                receivedMeta = null;
-                status.textContent = `File "${a.download}" received.`;
+                receivedChunks.push(e.data);
+                receivedSize += e.data.byteLength;
+                const progress = (receivedSize / receivedMeta.size) * 100;
+                // Update progress bar only every 5%
+                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || receivedSize >= receivedMeta.size) {
+                    progressBar.value = progress;
+                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
+                    console.log(`Received chunk, progress: ${progress.toFixed(2)}%`);
+                }
+
+                if (receivedSize >= receivedMeta.size) {
+                    const blob = new Blob(receivedChunks, { type: receivedMeta.type });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = receivedMeta.name || "received_file";
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    receivedMeta = null;
+                    receivedChunks = [];
+                    receivedSize = 0;
+                    progressBar.style.display = "none";
+                    status.textContent = `File "${a.download}" received.`;
+                }
             }
         };
 
         dc.onclose = () => {
             console.log("DataChannel closed.");
             sendBtn.disabled = true;
+            progressBar.style.display = "none";
             status.textContent = "DataChannel closed.";
         };
 
@@ -278,6 +317,34 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     };
 
+    async function sendChunkedFile(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        let offset = 0;
+        let lastProgress = 0;
+
+        while (offset < file.size) {
+            // Send as many chunks as possible up to buffer limit
+            while (offset < file.size && dc.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+                const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
+                dc.send(chunk);
+                offset += chunk.byteLength;
+                const progress = (offset / file.size) * 100;
+                // Update progress bar only every 5%
+                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
+                    progressBar.value = progress;
+                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
+                    console.log(`Sent chunk, progress: ${progress.toFixed(2)}%`);
+                }
+            }
+
+            // If buffer is full, wait briefly and retry
+            if (offset < file.size && dc.bufferedAmount >= MAX_BUFFERED_AMOUNT) {
+                console.log(`Buffer full (${dc.bufferedAmount} bytes), waiting...`);
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+        }
+    }
+
     sendBtn.onclick = async () => {
         const file = fileInput.files[0];
         console.log("File selected:", file);
@@ -295,14 +362,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
         try {
             status.textContent = `Sending file: ${file.name}`;
-            dc.send(JSON.stringify({ name: file.name, type: file.type }));
+            progressBar.style.display = "block";
+            progressBar.value = 0;
 
-            const arrayBuffer = await file.arrayBuffer();
-            dc.send(arrayBuffer);
+            // Send metadata
+            const metadata = { name: file.name, type: file.type, size: file.size };
+            dc.send(JSON.stringify(metadata));
+            console.log("Sent metadata:", metadata);
+
+            // Send chunks
+            await sendChunkedFile(file);
+
             status.textContent = `File "${file.name}" sent successfully.`;
+            progressBar.style.display = "none";
         } catch (err) {
             console.error("Error sending file:", err);
             status.textContent = "Failed to send file.";
+            progressBar.style.display = "none";
         }
     };
 
@@ -314,6 +390,5 @@ document.addEventListener("DOMContentLoaded", () => {
         peerInfo.textContent = `Peers: ${count || 0}`;
     }
 
-    // Initialize WebSocket connection
     connectWebSocket();
 });
