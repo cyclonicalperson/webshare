@@ -1,129 +1,133 @@
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: process.env.PORT || 3000 });
+const express = require("express");
+const fetch = require("node-fetch");
+const WebSocket = require("ws");
+const dotenv = require("dotenv");
+const rateLimit = require("express-rate-limit");
 
-const rooms = new Map();
-const clientRoom = new Map();
+// Load environment variables
+dotenv.config();
 
-function broadcastRoomInfo(roomId) {
-    const clients = rooms.get(roomId);
-    if (!clients) {
-        console.log(`No clients in room ${roomId}`);
-        return;
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Metered API key from environment variable
+const METERED_API_KEY = process.env.METERED_API_KEY;
+
+// Rate limiting for credential endpoint
+const credentialLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 10, // 10 requests per minute
+    message: "Too many credential requests, please try again later."
+});
+
+app.use(express.json());
+
+// Endpoint to fetch Metered TURN credentials
+app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
+    try {
+        if (!METERED_API_KEY) {
+            throw new Error("Metered API key not configured.");
+        }
+        console.log(`Credential request from ${req.ip}`);
+        const response = await fetch(
+            `https://webshare.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
+            { method: "POST" }
+        );
+        if (!response.ok) {
+            throw new Error(`Metered API error: ${response.status}`);
+        }
+        const data = await response.json();
+        res.json({
+            username: data.username,
+            password: data.password,
+            uris: data.uris
+        });
+    } catch (err) {
+        console.error("Error fetching TURN credentials:", err.message);
+        res.status(500).json({ error: "Failed to fetch TURN credentials" });
     }
-    const message = JSON.stringify({
-        type: 'room-update',
-        room: roomId,
-        count: clients.size,
+});
+
+// WebSocket server for signaling
+const wss = new WebSocket.Server({ noServer: true });
+
+wss.on("connection", (ws) => {
+    console.log("New WebSocket connection");
+    ws.isAlive = true;
+
+    ws.on("pong", () => {
+        ws.isAlive = true;
     });
-    console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}`);
-    for (const client of clients) {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        } else {
-            console.log(`Client in room ${roomId} is not open, state: ${client.readyState}`);
-        }
-    }
-}
 
-function forwardToRoom(sender, messageObj) {
-    const roomId = clientRoom.get(sender);
-    if (!roomId) {
-        console.log("No room found for sender");
-        return;
-    }
-    const clients = rooms.get(roomId);
-    if (!clients) {
-        console.log(`No clients in room ${roomId}`);
-        return;
-    }
-    const msg = JSON.stringify(messageObj);
-    console.log(`Forwarding ${messageObj.type} to room ${roomId}`);
-    for (const client of clients) {
-        if (client !== sender && client.readyState === WebSocket.OPEN) {
-            client.send(msg);
-        }
-    }
-}
-
-wss.on('connection', (ws) => {
-    console.log("New WebSocket connection established");
-
-    ws.on('message', (data) => {
-        let msg;
+    ws.on("message", (message) => {
         try {
-            msg = JSON.parse(data);
-            console.log("Received message:", msg);
+            const data = JSON.parse(message);
+            console.log("Received WebSocket message:", data);
+
+            switch (data.type) {
+                case "ping":
+                    ws.send(JSON.stringify({ type: "pong" }));
+                    break;
+                case "join":
+                    wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify({
+                                type: "joined",
+                                room: data.room,
+                                initiator: ws.initiator,
+                                count: wss.clients.size
+                            }));
+                        }
+                    });
+                    break;
+                case "offer":
+                case "answer":
+                case "ice-candidate":
+                    wss.clients.forEach(client => {
+                        if (client !== ws && client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify(data));
+                        }
+                    });
+                    break;
+                default:
+                    console.warn("Unknown message type:", data.type);
+            }
         } catch (err) {
-            console.error("Failed to parse message:", err);
-            return;
-        }
-
-        if (msg.type === 'join') {
-            const roomId = msg.room;
-            if (!roomId) {
-                console.log("No room ID provided");
-                return;
-            }
-
-            // Clean up previous room
-            const prevRoom = clientRoom.get(ws);
-            if (prevRoom && rooms.has(prevRoom)) {
-                console.log(`Removing client from previous room: ${prevRoom}`);
-                rooms.get(prevRoom).delete(ws);
-                broadcastRoomInfo(prevRoom);
-                if (rooms.get(prevRoom).size === 0) {
-                    rooms.delete(prevRoom);
-                    console.log(`Deleted empty room: ${prevRoom}`);
-                }
-            }
-
-            // Join new room
-            if (!rooms.has(roomId)) {
-                rooms.set(roomId, new Set());
-                console.log(`Created new room: ${roomId}`);
-            }
-            rooms.get(roomId).add(ws);
-            clientRoom.set(ws, roomId);
-            console.log(`Client joined room: ${roomId}`);
-
-            const clients = rooms.get(roomId);
-            const initiator = clients.size === 1;
-
-            ws.send(JSON.stringify({
-                type: 'joined',
-                room: roomId,
-                count: clients.size,
-                initiator
-            }));
-            console.log(`Sent joined message to client: ${roomId}, count: ${clients.size}, initiator: ${initiator}`);
-
-            broadcastRoomInfo(roomId);
-            return;
-        }
-
-        if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice-candidate') {
-            forwardToRoom(ws, msg);
+            console.error("Error processing WebSocket message:", err);
         }
     });
 
-    ws.on('close', () => {
-        const roomId = clientRoom.get(ws);
-        if (roomId && rooms.has(roomId)) {
-            console.log(`Client disconnected from room: ${roomId}`);
-            rooms.get(roomId).delete(ws);
-            if (rooms.get(roomId).size === 0) {
-                rooms.delete(roomId);
-                console.log(`Deleted empty room: ${roomId}`);
-            } else {
-                broadcastRoomInfo(roomId);
+    ws.on("close", () => {
+        console.log("WebSocket connection closed");
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({
+                    type: "room-update",
+                    room: "1",
+                    count: wss.clients.size
+                }));
             }
-        }
-        clientRoom.delete(ws);
-    });
-
-    ws.on('error', (err) => {
-        console.error("WebSocket error:", err);
+        });
     });
 });
 
-console.log('WebSocket signaling server running on port 3000');
+// HTTP server for Express and WebSocket
+const server = app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+});
+
+// Upgrade HTTP to WebSocket
+server.on("upgrade", (request, socket, head) => {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+    });
+});
+
+// Keep WebSocket connections alive
+setInterval(() => {
+    wss.clients.forEach(ws => {
+        if (!ws.isAlive) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
