@@ -15,28 +15,36 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentRoom = "";
     const MAX_RETRIES = 5;
     let retryCount = 0;
-    let pendingIceCandidates = []; // Store ICE candidates until remote description is set
+    let pendingIceCandidates = [];
+    let isReconnecting = false; // Prevent multiple simultaneous reconnections
 
     function connectWebSocket() {
+        if (isReconnecting) return;
+        isReconnecting = true;
         status.textContent = "Connecting to signaling server...";
-        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app/");
+        console.log("Attempting WebSocket connection...");
+        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app");
 
         ws.onopen = () => {
             retryCount = 0;
+            isReconnecting = false;
             status.textContent = "Connected to signaling server.";
             console.log("WebSocket connection established.");
+            // Re-join the room if previously in one
+            if (currentRoom) {
+                console.log(`Re-joining room: ${currentRoom}`);
+                ws.send(JSON.stringify({ type: "join", room: currentRoom }));
+            }
         };
 
         ws.onerror = (err) => {
             console.error("WebSocket error:", err);
             status.textContent = "WebSocket error occurred.";
-            retryConnection();
         };
 
         ws.onclose = () => {
             console.warn("WebSocket closed.");
             status.textContent = "WebSocket connection closed.";
-            cleanupPeerConnection();
             retryConnection();
         };
 
@@ -47,14 +55,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 switch (data.type) {
                     case "joined":
+                        console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
                         currentRoom = data.room;
                         isInitiator = data.initiator;
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        // Clean up existing PeerConnection
-                        cleanupPeerConnection();
-                        createPeerConnection();
+                        // Only reset PeerConnection if not already connected
+                        if (!pc || pc.connectionState !== "connected") {
+                            cleanupPeerConnection();
+                            createPeerConnection();
+                        }
 
                         if (!isInitiator) {
                             console.log("Setting up DataChannel for non-initiator.");
@@ -66,7 +77,6 @@ document.addEventListener("DOMContentLoaded", () => {
                             console.log("Creating DataChannel as initiator.");
                             dc = pc.createDataChannel("file");
                             setupDataChannel(dc);
-                            // Create and send offer
                             console.log("Creating offer as initiator.");
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
@@ -78,7 +88,6 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (!pc) createPeerConnection();
                         console.log("Received offer, setting remote description.");
                         await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                        // Add any pending ICE candidates
                         while (pendingIceCandidates.length > 0) {
                             const candidate = pendingIceCandidates.shift();
                             try {
@@ -97,7 +106,6 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (pc) {
                             console.log("Received answer, setting remote description.");
                             await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                            // Add any pending ICE candidates
                             while (pendingIceCandidates.length > 0) {
                                 const candidate = pendingIceCandidates.shift();
                                 try {
@@ -125,8 +133,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         break;
 
                     case "room-update":
+                        console.log(`Room update: ${data.room}, count: ${data.count}`);
                         updatePeerInfo(data.count);
-                        // If initiator and new peer joins, re-send offer
                         if (isInitiator && data.count > 1 && pc) {
                             console.log("New peer joined, re-sending offer as initiator.");
                             const offer = await pc.createOffer();
@@ -145,13 +153,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function retryConnection() {
-        if (retryCount < MAX_RETRIES) {
-            retryCount++;
-            status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
-            setTimeout(connectWebSocket, 1000 * retryCount);
-        } else {
+        if (retryCount >= MAX_RETRIES || isReconnecting) {
             status.textContent = "Failed to connect to signaling server.";
+            isReconnecting = false;
+            return;
         }
+        retryCount++;
+        status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
+        console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
+        setTimeout(connectWebSocket, 2000 * retryCount); // Exponential backoff
     }
 
     function createPeerConnection() {
@@ -259,10 +269,12 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         if (ws?.readyState === WebSocket.OPEN) {
             currentRoom = room;
+            console.log(`Sending join request for room: ${room}`);
             ws.send(JSON.stringify({ type: "join", room }));
             status.textContent = `Joining room: ${room}`;
         } else {
-            status.textContent = "WebSocket not connected.";
+            status.textContent = "WebSocket not connected. Reconnecting...";
+            connectWebSocket();
         }
     };
 
