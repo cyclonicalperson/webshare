@@ -3,6 +3,7 @@ const fetch = require("node-fetch");
 const WebSocket = require("ws");
 const dotenv = require("dotenv");
 const rateLimit = require("express-rate-limit");
+const cors = require("cors");
 
 // Load environment variables
 dotenv.config();
@@ -12,6 +13,11 @@ const port = process.env.PORT || 3000;
 
 // Metered API key from environment variable
 const METERED_API_KEY = process.env.METERED_API_KEY;
+
+// Enable CORS for all origins (or specify: ["https://websharer.netlify.app"])
+app.use(cors({
+    origin: "*" // Use "*" for simplicity; replace with "https://websharer.netlify.app" for production
+}));
 
 // Rate limiting for credential endpoint
 const credentialLimiter = rateLimit({
@@ -26,7 +32,8 @@ app.use(express.json());
 app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
     try {
         if (!METERED_API_KEY) {
-            throw new Error("Metered API key not configured.");
+            console.error("Missing METERED_API_KEY in environment variables.");
+            return res.status(500).json({ error: "Metered API key not configured." });
         }
         console.log(`Credential request from ${req.ip}`);
         const response = await fetch(
@@ -34,7 +41,9 @@ app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
             { method: "POST" }
         );
         if (!response.ok) {
-            throw new Error(`Metered API error: ${response.status}`);
+            const errorText = await response.text();
+            console.error("Metered API error details:", errorText);
+            return res.status(500).json({ error: `Metered API error: ${response.status}` });
         }
         const data = await response.json();
         res.json({
@@ -69,6 +78,8 @@ wss.on("connection", (ws) => {
                     ws.send(JSON.stringify({ type: "pong" }));
                     break;
                 case "join":
+                    // Assign initiator: first client in room is initiator
+                    ws.initiator = wss.clients.size === 1;
                     wss.clients.forEach(client => {
                         if (client.readyState === WebSocket.OPEN) {
                             client.send(JSON.stringify({
