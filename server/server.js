@@ -1,22 +1,23 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const WebSocket = require("ws");
-const dotenv = require("dotenv");
 const rateLimit = require("express-rate-limit");
 const cors = require("cors");
-
-// Load environment variables
-dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Enable trust proxy for Koyeb's X-Forwarded-For header
+app.set("trust proxy", true);
+
 // Metered API key from environment variable
 const METERED_API_KEY = process.env.METERED_API_KEY;
+console.log("Environment variables:", Object.keys(process.env));
+console.log("METERED_API_KEY loaded:", !!METERED_API_KEY);
 
 // Enable CORS for all origins (or specify: ["https://websharer.netlify.app"])
 app.use(cors({
-    origin: "*" // Use "*" for simplicity; replace with "https://websharer.netlify.app" for production
+    origin: "*" // Use "*" for testing; replace with "https://websharer.netlify.app" for production
 }));
 
 // Rate limiting for credential endpoint
@@ -28,32 +29,54 @@ const credentialLimiter = rateLimit({
 
 app.use(express.json());
 
+// Health check endpoint
+app.get("/health", (req, res) => {
+    res.status(200).json({ status: "ok", METERED_API_KEY_SET: !!METERED_API_KEY });
+});
+
 // Endpoint to fetch Metered TURN credentials
 app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
+    if (!METERED_API_KEY) {
+        console.error("Missing METERED_API_KEY in environment variables.");
+        return res.status(500).json({ error: "Metered API key not configured." });
+    }
+
+    console.log(`Credential request from ${req.ip}`);
     try {
-        if (!METERED_API_KEY) {
-            console.error("Missing METERED_API_KEY in environment variables.");
-            return res.status(500).json({ error: "Metered API key not configured." });
-        }
-        console.log(`Credential request from ${req.ip}`);
         const response = await fetch(
             `https://webshare.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
             { method: "POST" }
         );
+        console.log("Metered API response status:", response.status);
+
         if (!response.ok) {
-            const errorText = await response.text();
+            const errorText = await response.text().catch(() => "No response body");
             console.error("Metered API error details:", errorText);
-            return res.status(500).json({ error: `Metered API error: ${response.status}` });
+            return res.status(500).json({
+                error: `Metered API error: ${response.status}`,
+                details: errorText || "Unknown error from Metered API"
+            });
         }
+
         const data = await response.json();
+        console.log("Metered API response data:", data);
+
+        if (!data.username || !data.password || !data.uris) {
+            console.error("Invalid TURN credentials received from Metered API:", data);
+            return res.status(500).json({ error: "Invalid TURN credentials received." });
+        }
+
         res.json({
             username: data.username,
             password: data.password,
             uris: data.uris
         });
-    } catch (err) {
-        console.error("Error fetching TURN credentials:", err.message);
-        res.status(500).json({ error: "Failed to fetch TURN credentials" });
+    } catch (error) {
+        console.error("Error fetching TURN credentials:", error.message);
+        res.status(500).json({
+            error: "Failed to fetch TURN credentials",
+            details: error.message || "Unexpected error"
+        });
     }
 });
 

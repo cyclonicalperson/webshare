@@ -31,11 +31,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 headers: { "Content-Type": "application/json" }
             });
             if (!response.ok) {
-                throw new Error(`HTTP error: ${response.status}`);
+                console.error(`HTTP error: ${response.status}`);
+                status.textContent = "Failed to fetch TURN credentials. Please try again.";
+                return null;
             }
             const data = await response.json();
             if (!data.username || !data.password || !data.uris) {
-                throw new Error("Invalid TURN credentials received");
+                console.error("Invalid TURN credentials received");
+                status.textContent = "Failed to fetch TURN credentials. Please try again.";
+                return null;
             }
             console.log("Received TURN credentials:", data);
             return {
