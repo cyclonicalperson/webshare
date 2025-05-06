@@ -15,6 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentRoom = "";
     const MAX_RETRIES = 5;
     let retryCount = 0;
+    let pendingIceCandidates = []; // Store ICE candidates until remote description is set
 
     function connectWebSocket() {
         status.textContent = "Connecting to signaling server...";
@@ -51,7 +52,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        // Clean up existing PeerConnection if any
+                        // Clean up existing PeerConnection
                         cleanupPeerConnection();
                         createPeerConnection();
 
@@ -65,9 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             console.log("Creating DataChannel as initiator.");
                             dc = pc.createDataChannel("file");
                             setupDataChannel(dc);
-                        }
-
-                        if (isInitiator) {
+                            // Create and send offer
                             console.log("Creating offer as initiator.");
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
@@ -79,6 +78,16 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (!pc) createPeerConnection();
                         console.log("Received offer, setting remote description.");
                         await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                        // Add any pending ICE candidates
+                        while (pendingIceCandidates.length > 0) {
+                            const candidate = pendingIceCandidates.shift();
+                            try {
+                                await pc.addIceCandidate(candidate);
+                                console.log("Added queued ICE candidate:", candidate);
+                            } catch (err) {
+                                console.error("Failed to add queued ICE candidate:", err);
+                            }
+                        }
                         const answer = await pc.createAnswer();
                         await pc.setLocalDescription(answer);
                         ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
@@ -88,22 +97,42 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (pc) {
                             console.log("Received answer, setting remote description.");
                             await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                            // Add any pending ICE candidates
+                            while (pendingIceCandidates.length > 0) {
+                                const candidate = pendingIceCandidates.shift();
+                                try {
+                                    await pc.addIceCandidate(candidate);
+                                    console.log("Added queued ICE candidate:", candidate);
+                                } catch (err) {
+                                    console.error("Failed to add queued ICE candidate:", err);
+                                }
+                            }
                         }
                         break;
 
                     case "ice-candidate":
-                        if (pc) {
+                        if (pc && pc.remoteDescription) {
                             try {
                                 console.log("Adding ICE candidate:", data.candidate);
                                 await pc.addIceCandidate(data.candidate);
                             } catch (err) {
                                 console.error("Failed to add ICE candidate:", err);
                             }
+                        } else {
+                            console.log("Queuing ICE candidate:", data.candidate);
+                            pendingIceCandidates.push(data.candidate);
                         }
                         break;
 
                     case "room-update":
                         updatePeerInfo(data.count);
+                        // If initiator and new peer joins, re-send offer
+                        if (isInitiator && data.count > 1 && pc) {
+                            console.log("New peer joined, re-sending offer as initiator.");
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                        }
                         break;
 
                     default:
@@ -154,7 +183,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
         pc.onconnectionstatechange = () => {
             console.log("Connection state:", pc.connectionState);
-            if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
+            if (pc.connectionState === "connected") {
+                status.textContent = "Peer connection established.";
+            } else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
                 status.textContent = "Peer connection lost.";
                 cleanupPeerConnection();
             }
@@ -170,6 +201,7 @@ document.addEventListener("DOMContentLoaded", () => {
             pc.close();
             pc = null;
         }
+        pendingIceCandidates = [];
         sendBtn.disabled = true;
         console.log("Cleaned up PeerConnection and DataChannel.");
     }
@@ -201,7 +233,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 a.href = url;
                 a.download = receivedMeta.name || "received_file";
                 a.click();
-                URL.revokeObjectURL(url); // Clean up
+                URL.revokeObjectURL(url);
                 receivedMeta = null;
                 status.textContent = `File "${a.download}" received.`;
             }

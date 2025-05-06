@@ -37,7 +37,8 @@ wss.on('connection', (ws) => {
         let msg;
         try {
             msg = JSON.parse(data);
-        } catch {
+        } catch (err) {
+            console.error("Failed to parse message:", err);
             return;
         }
 
@@ -45,13 +46,19 @@ wss.on('connection', (ws) => {
             const roomId = msg.room;
             if (!roomId) return;
 
+            // Clean up previous room
             const prevRoom = clientRoom.get(ws);
             if (prevRoom && rooms.has(prevRoom)) {
                 rooms.get(prevRoom).delete(ws);
                 broadcastRoomInfo(prevRoom);
+                if (rooms.get(prevRoom).size === 0) {
+                    rooms.delete(prevRoom);
+                }
             }
 
-            if (!rooms.has(roomId)) rooms.set(roomId, new Set());
+            // Join new room
+            if (!rooms.has(roomId)) rooms.set
+            rooms.set(roomId, new Set());
             rooms.get(roomId).add(ws);
             clientRoom.set(ws, roomId);
 
@@ -85,6 +92,10 @@ wss.on('connection', (ws) => {
             }
         }
         clientRoom.delete(ws);
+    });
+
+    ws.on('error', (err) => {
+        console.error("WebSocket error:", err);
     });
 });
 
