@@ -146,8 +146,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     case "room-update":
                         console.log(`Room update: ${data.room}, count: ${data.count}`);
                         updatePeerInfo(data.count);
-                        if (isInitiator && data.count > 1 && pc) {
-                            console.log("New peer joined, re-sending offer as initiator.");
+                        if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected") {
+                            console.log("New peer joined, restarting ICE as initiator.");
+                            pc.restartIce();
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
                             ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
@@ -172,7 +173,7 @@ document.addEventListener("DOMContentLoaded", () => {
         retryCount++;
         status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
         console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(connectWebSocket, 2000 * retryCount);
+        setTimeout(connectWebSocket, 5000 * retryCount); // Increased to 5s
     }
 
     function createPeerConnection() {
@@ -180,9 +181,16 @@ document.addEventListener("DOMContentLoaded", () => {
         pc = new RTCPeerConnection({
             iceServers: [
                 { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:19302" }
-                // Add TURN server if needed for better connectivity:
-                // { urls: "turn:your.turn.server", username: "user", credential: "pass" }
+                { urls: "stun:stun1.l.google.com:3478" },
+                {
+                    urls: [
+                        "turn:openrelay.metered.ca:80",
+                        "turn:openrelay.metered.ca:443",
+                        "turn:openrelay.metered.ca:443?transport=tcp"
+                    ],
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
             ]
         });
 
@@ -197,9 +205,13 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log("ICE connection state:", pc.iceConnectionState);
             if (pc.iceConnectionState === "failed") {
                 status.textContent = "ICE connection failed. Restarting...";
-                cleanupPeerConnection();
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: "join", room: currentRoom }));
+                console.log("ICE failed, attempting restart. Check about:webrtc for details.");
+                if (isInitiator) {
+                    pc.restartIce();
+                    pc.createOffer().then(offer => {
+                        pc.setLocalDescription(offer);
+                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                    }).catch(err => console.error("Failed to restart ICE:", err));
                 }
             }
         };
@@ -263,7 +275,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 receivedChunks.push(e.data);
                 receivedSize += e.data.byteLength;
                 const progress = (receivedSize / receivedMeta.size) * 100;
-                // Update progress bar only every 5%
                 if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || receivedSize >= receivedMeta.size) {
                     progressBar.value = progress;
                     lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
@@ -323,13 +334,11 @@ document.addEventListener("DOMContentLoaded", () => {
         let lastProgress = 0;
 
         while (offset < file.size) {
-            // Send as many chunks as possible up to buffer limit
             while (offset < file.size && dc.bufferedAmount < MAX_BUFFERED_AMOUNT) {
                 const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
                 dc.send(chunk);
                 offset += chunk.byteLength;
                 const progress = (offset / file.size) * 100;
-                // Update progress bar only every 5%
                 if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
                     progressBar.value = progress;
                     lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
@@ -337,7 +346,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
 
-            // If buffer is full, wait briefly and retry
             if (offset < file.size && dc.bufferedAmount >= MAX_BUFFERED_AMOUNT) {
                 console.log(`Buffer full (${dc.bufferedAmount} bytes), waiting...`);
                 await new Promise(resolve => setTimeout(resolve, 50));
@@ -365,12 +373,10 @@ document.addEventListener("DOMContentLoaded", () => {
             progressBar.style.display = "block";
             progressBar.value = 0;
 
-            // Send metadata
             const metadata = { name: file.name, type: file.type, size: file.size };
             dc.send(JSON.stringify(metadata));
             console.log("Sent metadata:", metadata);
 
-            // Send chunks
             await sendChunkedFile(file);
 
             status.textContent = `File "${file.name}" sent successfully.`;
