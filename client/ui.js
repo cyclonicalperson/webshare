@@ -21,9 +21,9 @@ document.addEventListener("DOMContentLoaded", () => {
     themeToggle.addEventListener("click", () => {
         document.body.classList.toggle("light-theme");
         if (document.body.classList.contains("light-theme")) {
-            themeIcon.className = "fas fa-sun";
+            themeIcon.className = "icon-sun";
         } else {
-            themeIcon.className = "fas fa-moon";
+            themeIcon.className = "icon-moon";
         }
     });
 

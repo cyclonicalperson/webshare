@@ -1,3 +1,29 @@
+/* WebShare - Main Stylesheet */
+
+/* Icon replacements using Unicode characters */
+.icon-share::before { content: "⇄"; }
+.icon-signin::before { content: "→"; }
+.icon-random::before { content: "⟳"; }
+.icon-upload::before { content: "⬆"; }
+.icon-send::before { content: "⤴"; }
+.icon-moon::before { content: "☾"; }
+.icon-sun::before { content: "☀"; }
+.icon-lock::before { content: "🔒"; }
+
+/* Set font properties for icons */
+[class^="icon-"] {
+    font-style: normal;
+    font-weight: normal;
+    display: inline-block;
+    text-decoration: inherit;
+    width: 1em;
+    margin-right: 0.2em;
+    text-align: center;
+    font-variant: normal;
+    text-transform: none;
+    line-height: 1em;
+}
+
 :root {
     --primary-color: #4a6fa5;
     --accent-color: #6cb2eb;
