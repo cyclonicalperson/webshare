@@ -7,6 +7,13 @@ const wss = new WebSocket.Server({ server });
 const rooms = new Map();
 const clientRoom = new Map();
 
+// CORS middleware
+function setCORSHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', 'https://websharer.netlify.app');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
 function broadcastRoomInfo(roomId) {
     const clients = rooms.get(roomId);
     if (!clients) {
@@ -132,15 +139,24 @@ wss.on('connection', (ws) => {
 // Endpoint to fetch TURN credentials
 server.on('request', async (req, res) => {
     if (req.url === '/turn-credentials' && req.method === 'GET') {
+        setCORSHeaders(res);
+        const apiKey = process.env.METERED_API_KEY;
+        if (!apiKey) {
+            console.error("METERED_API_KEY not set");
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: "Server configuration error" }));
+            return;
+        }
         try {
-            const apiKey = process.env.METERED_API_KEY;
-            if (!apiKey) {
-                throw new Error("METERED_API_KEY not set");
-            }
             const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
-            const iceServers = await response.json();
+            if (!response.ok) {
+                console.error(`HTTP error fetching TURN credentials, status: ${response.status}`);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: "Failed to fetch TURN credentials" }));
+                return;
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(iceServers));
+            res.end(JSON.stringify(await response.json()));
         } catch (err) {
             console.error("Failed to fetch TURN credentials:", err);
             res.writeHead(500, { 'Content-Type': 'application/json' });

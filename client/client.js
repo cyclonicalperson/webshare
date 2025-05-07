@@ -25,11 +25,17 @@ document.addEventListener("DOMContentLoaded", () => {
     async function fetchIceServers() {
         try {
             const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/turn-credentials");
-            const iceServers = await response.json();
-            return iceServers;
+            if (!response.ok) {
+                console.error(`HTTP error fetching ICE servers, status: ${response.status}`);
+                return [
+                    { urls: "stun:stun.relay.metered.ca:80" },
+                    { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:3478" }
+                ];
+            }
+            return await response.json();
         } catch (err) {
             console.error("Failed to fetch ICE servers:", err);
-            // Fallback to public STUN servers
             return [
                 { urls: "stun:stun.relay.metered.ca:80" },
                 { urls: "stun:stun.l.google.com:19302" },
@@ -93,7 +99,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                         if (!pc || pc.connectionState !== "connected") {
                             cleanupPeerConnection();
-                            createPeerConnection();
+                            await createPeerConnection();
                         }
 
                         if (!isInitiator) {
@@ -114,21 +120,25 @@ document.addEventListener("DOMContentLoaded", () => {
                         break;
 
                     case "offer":
-                        if (!pc) createPeerConnection();
-                        console.log("Received offer, setting remote description.");
-                        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                        while (pendingIceCandidates.length > 0) {
-                            const candidate = pendingIceCandidates.shift();
-                            try {
-                                await pc.addIceCandidate(candidate);
-                                console.log("Added queued ICE candidate:", candidate);
-                            } catch (err) {
-                                console.error("Failed to add queued ICE candidate:", err);
-                            }
+                        if (!pc) {
+                            await createPeerConnection();
                         }
-                        const answer = await pc.createAnswer();
-                        await pc.setLocalDescription(answer);
-                        ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
+                        if (pc) {
+                            console.log("Received offer, setting remote description.");
+                            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                            while (pendingIceCandidates.length > 0) {
+                                const candidate = pendingIceCandidates.shift();
+                                try {
+                                    await pc.addIceCandidate(candidate);
+                                    console.log("Added queued ICE candidate:", candidate);
+                                } catch (err) {
+                                    console.error("Failed to add queued ICE candidate:", err);
+                                }
+                            }
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
+                        }
                         break;
 
                     case "answer":
