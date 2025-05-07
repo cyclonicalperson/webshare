@@ -1,4 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
+    // DOM Elements
     const roomInput = document.getElementById("roomInput");
     const joinRoomBtn = document.getElementById("joinRoomBtn");
     const roomDisplay = document.getElementById("roomDisplay");
@@ -8,120 +9,103 @@ document.addEventListener("DOMContentLoaded", () => {
     const progressBar = document.getElementById("progressBar");
     const status = document.getElementById("status");
 
+    // Constants
+    const SERVER_URL = "wss://primary-tove-arsenijevicdev-4f187706.koyeb.app";
+    const CHUNK_SIZE = 131072; // 128KB chunks
+    const MAX_BUFFERED_AMOUNT = 2097152; // 2MB buffer threshold
+    const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
+    const RECONNECT_TIMEOUT = 5000; // 5 seconds
+    const MAX_RECONNECT_ATTEMPTS = 5;
+
+    // State variables
     let ws = null;
     let pc = null;
     let dc = null;
     let isInitiator = false;
     let currentRoom = "";
-    const MAX_RETRIES = 5;
-    let retryCount = 0;
+    let reconnectAttempts = 0;
     let pendingIceCandidates = [];
-    let pendingOffers = [];
-    let isReconnecting = false;
-    let iceRestartCount = 0;
-    const MAX_ICE_RESTARTS = 1;
-    const CHUNK_SIZE = 131072;
-    const MAX_BUFFERED_AMOUNT = 4194304;
-    const PROGRESS_UPDATE_INTERVAL = 5;
-    const WS_TIMEOUT = 20000;
-    let usingTurn = false;
-    let turnCredentials = null;
-    let lastPeerCount = 0;
-    let peerDeviceType = "unknown";
-    let localDeviceType = "desktop";
-    let isProcessingOffer = false;
+    let deviceType = detectDeviceType();
+    let isConnectingPeer = false;
 
+    // Detect user's device type
     function detectDeviceType() {
         const ua = navigator.userAgent.toLowerCase();
-        const isMobile = /mobile|android|iphone|ipad|tablet|ipod|blackberry|windows phone/.test(ua);
-        localDeviceType = isMobile ? "mobile" : "desktop";
-        console.log(`Detected device type: ${localDeviceType}`);
-        return localDeviceType;
+        const isMobile = /mobile|android|iphone|ipad|ipod|blackberry|windows phone/.test(ua);
+        return isMobile ? "mobile" : "desktop";
     }
 
-    async function fetchIceServers(useTurn = false) {
+    // Get appropriate ICE servers based on connection needs
+    async function getIceServers(useTurn = false) {
+        // Basic STUN servers (always include these)
+        const stunServers = [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" }
+        ];
+
         if (!useTurn) {
-            console.log("Attempting STUN-only connection.");
-            return [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:3478" }
-            ];
+            console.log("Using STUN-only configuration");
+            return stunServers;
         }
 
-        turnCredentials = null;
         try {
-            console.log("Fetching ICE servers with TURN...");
-            const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/turn-credentials");
+            console.log("Fetching TURN servers...");
+            const response = await fetch(`${SERVER_URL.replace("wss:", "https:")}/turn-credentials`);
+
             if (!response.ok) {
-                console.error(`HTTP error fetching ICE servers, status: ${response.status}, text: ${await response.text()}`);
-                return [
-                    { urls: "stun:stun.l.google.com:19302" },
-                    {
-                        urls: "turn:openrelay.metered.ca:443",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
-                    }
-                ];
+                console.warn("Failed to fetch TURN servers, falling back to backup");
+                return [...stunServers, {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }];
             }
+
             const iceServers = await response.json();
-            console.log("Fetched ICE servers:", iceServers);
-            const turnServer = iceServers.find(server => server.urls.includes("turn:") && server.urls.includes(":443")) ||
-                iceServers.find(server => server.urls.includes("turn:"));
-            const stunServer = iceServers.find(server => server.urls.includes("stun:"));
-            const selectedServers = [];
-            if (turnServer) selectedServers.push(turnServer);
-            if (stunServer) selectedServers.push(stunServer);
-            turnCredentials = selectedServers.length > 0 ? selectedServers : [
-                { urls: "stun:stun.l.google.com:19302" },
-                {
-                    urls: "turn:openrelay.metered.ca:443",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }
-            ];
-            return turnCredentials;
+            console.log("Using server-provided ICE configuration");
+            return iceServers;
         } catch (err) {
-            console.error("Failed to fetch ICE servers:", err);
-            return [
-                { urls: "stun:stun.l.google.com:19302" },
-                {
-                    urls: "turn:openrelay.metered.ca:443",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }
-            ];
+            console.error("Error fetching TURN credentials:", err);
+            return [...stunServers, {
+                urls: "turn:openrelay.metered.ca:443",
+                username: "openrelayproject",
+                credential: "openrelayproject"
+            }];
         }
     }
 
-    async function decideIceServers() {
-        const useTurn = localDeviceType === "mobile" || peerDeviceType === "mobile";
-        console.log(`Deciding ICE servers: local=${localDeviceType}, peer=${peerDeviceType}, useTurn=${useTurn}`);
-        return await fetchIceServers(useTurn);
-    }
-
+    // Connect to the signaling server
     function connectWebSocket() {
-        if (isReconnecting || ws?.readyState === WebSocket.OPEN) return;
-        isReconnecting = true;
+        if (ws && ws.readyState === WebSocket.OPEN) return;
+
         status.textContent = "Connecting to signaling server...";
-        console.log("Attempting WebSocket connection...");
-        ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app");
-        ws.timeout = WS_TIMEOUT;
+        console.log("Connecting to WebSocket server...");
+
+        ws = new WebSocket(SERVER_URL);
 
         ws.onopen = () => {
-            retryCount = 0;
-            isReconnecting = false;
+            reconnectAttempts = 0;
             status.textContent = "Connected to signaling server.";
-            console.log("WebSocket connection established.");
+            console.log("WebSocket connection established");
+
+            // Setup keepalive ping
             setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: "ping" }));
-                    console.log("Sent ping");
                 }
             }, 30000);
+
+            // Join room if we have one
             if (currentRoom) {
-                console.log(`Joining room: ${currentRoom}`);
-                ws.send(JSON.stringify({ type: "join", room: currentRoom, deviceType: localDeviceType }));
+                joinRoom(currentRoom);
             }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket connection closed");
+            status.textContent = "Connection to server lost. Reconnecting...";
+            cleanupPeerConnection();
+            attemptReconnect();
         };
 
         ws.onerror = (err) => {
@@ -129,502 +113,491 @@ document.addEventListener("DOMContentLoaded", () => {
             status.textContent = "WebSocket error occurred.";
         };
 
-        ws.onclose = () => {
-            console.warn("WebSocket closed.");
-            status.textContent = "WebSocket connection closed.";
+        ws.onmessage = handleWebSocketMessage;
+    }
+
+    // Handle reconnection attempts
+    function attemptReconnect() {
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            status.textContent = "Failed to reconnect after multiple attempts.";
+            return;
+        }
+
+        reconnectAttempts++;
+        status.textContent = `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+
+        setTimeout(connectWebSocket, RECONNECT_TIMEOUT);
+    }
+
+    // Process messages from the signaling server
+    function handleWebSocketMessage(event) {
+        try {
+            const data = JSON.parse(event.data);
+            console.log("Received:", data.type);
+
+            switch (data.type) {
+                case "pong":
+                    // Server keepalive response
+                    break;
+
+                case "joined":
+                    handleRoomJoined(data);
+                    break;
+
+                case "offer":
+                    handleRemoteOffer(data.offer);
+                    break;
+
+                case "answer":
+                    handleRemoteAnswer(data.answer);
+                    break;
+
+                case "ice-candidate":
+                    handleRemoteIceCandidate(data.candidate);
+                    break;
+
+                case "room-update":
+                    handleRoomUpdate(data);
+                    break;
+
+                default:
+                    console.log("Unknown message type:", data.type);
+            }
+        } catch (err) {
+            console.error("Error processing message:", err);
+        }
+    }
+
+    // Handle joining a room successfully
+    async function handleRoomJoined(data) {
+        console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, peers: ${data.count}`);
+        currentRoom = data.room;
+        isInitiator = data.initiator;
+
+        roomDisplay.textContent = `Room: ${currentRoom}`;
+        peerInfo.textContent = `Peers: ${data.count}`;
+
+        // Start the WebRTC connection if we're the initiator or if there are other peers
+        if (isInitiator || data.count > 1) {
+            // By default, start with STUN for desktop-desktop connections
+            // Use TURN for connections involving mobile devices
+            const needTurn = deviceType === "mobile" || data.peerTypes?.includes("mobile");
+            await setupPeerConnection(needTurn);
+
+            if (isInitiator) {
+                createDataChannel();
+                createAndSendOffer();
+            }
+        }
+    }
+
+    // Handle updates about the room state
+    async function handleRoomUpdate(data) {
+        peerInfo.textContent = `Peers: ${data.count}`;
+
+        // If we're the initiator and a peer just joined, send them an offer
+        if (isInitiator && data.count > 1 && (!pc || pc.connectionState !== "connected")) {
+            if (isConnectingPeer) {
+                console.log("Already connecting to peer, ignoring room update");
+                return;
+            }
+
+            console.log("New peer detected, sending offer");
+            const needTurn = deviceType === "mobile" || data.devices?.includes("mobile");
+            await setupPeerConnection(needTurn);
+            createDataChannel();
+            createAndSendOffer();
+        }
+
+        // If all peers left, cleanup
+        if (data.count <= 1 && pc) {
+            console.log("All peers left, cleaning up connection");
             cleanupPeerConnection();
-            retryConnection();
-        };
-
-        ws.onmessage = (message) => {
-            (async () => {
-                try {
-                    const data = JSON.parse(message.data);
-                    console.log("Received message:", data);
-
-                    switch (data.type) {
-                        case "pong":
-                            console.log("Received pong from server");
-                            break;
-
-                        case "joined":
-                            console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
-                            currentRoom = data.room;
-                            isInitiator = data.initiator;
-                            iceRestartCount = 0;
-                            usingTurn = false;
-                            lastPeerCount = data.count;
-                            updateRoomDisplay();
-                            updatePeerInfo(data.count);
-
-                            // Delay to allow initiator offer to arrive
-                            if (!isInitiator) {
-                                await new Promise(resolve => setTimeout(resolve, 1000));
-                            }
-                            await createPeerConnection();
-
-                            if (isInitiator) {
-                                console.log("Creating DataChannel as initiator.");
-                                dc = pc.createDataChannel("file");
-                                setupDataChannel(dc);
-                                console.log("Creating offer as initiator.");
-                                const offer = await pc.createOffer();
-                                await pc.setLocalDescription(offer);
-                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                            }
-                            break;
-
-                        case "offer":
-                            if (isProcessingOffer) {
-                                console.log("Offer received while processing another offer, queuing...");
-                                pendingOffers.push(data.offer);
-                                break;
-                            }
-
-                            isProcessingOffer = true;
-                            try {
-                                if (!pc || pc.signalingState === "closed") {
-                                    await createPeerConnection();
-                                    pc.ondatachannel = (e) => {
-                                        console.log("Setting up DataChannel for non-initiator.");
-                                        dc = e.channel;
-                                        setupDataChannel(dc);
-                                    };
-                                }
-                                if (pc.signalingState !== "stable") {
-                                    console.log("Rolling back signaling state to handle new offer.");
-                                    await pc.setLocalDescription({ type: "rollback" });
-                                }
-                                console.log("Received offer, setting remote description.");
-                                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                                while (pendingIceCandidates.length > 0) {
-                                    const candidate = pendingIceCandidates.shift();
-                                    try {
-                                        await pc.addIceCandidate(candidate);
-                                        console.log("Added queued ICE candidate:", candidate);
-                                    } catch (err) {
-                                        console.error("Failed to add queued ICE candidate:", err);
-                                    }
-                                }
-                                const answer = await pc.createAnswer();
-                                await pc.setLocalDescription(answer);
-                                ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
-                            } finally {
-                                isProcessingOffer = false;
-                                if (pendingOffers.length > 0) {
-                                    const nextOffer = pendingOffers.shift();
-                                    ws.onmessage({ data: JSON.stringify({ type: "offer", offer: nextOffer, room: currentRoom }) });
-                                }
-                            }
-                            break;
-
-                        case "answer":
-                            if (pc && pc.signalingState === "have-local-offer") {
-                                console.log("Received answer, setting remote description.");
-                                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                                while (pendingIceCandidates.length > 0) {
-                                    const candidate = pendingIceCandidates.shift();
-                                    try {
-                                        await pc.addIceCandidate(candidate);
-                                        console.log("Added queued ICE candidate:", candidate);
-                                    } catch (err) {
-                                        console.error("Failed to add queued ICE candidate:", err);
-                                    }
-                                }
-                            } else {
-                                console.warn("Ignoring answer, signaling state is:", pc?.signalingState || "null");
-                            }
-                            break;
-
-                        case "ice-candidate":
-                            if (pc && pc.remoteDescription && data.candidate.candidate) {
-                                try {
-                                    console.log("Adding ICE candidate:", data.candidate);
-                                    await pc.addIceCandidate(data.candidate);
-                                } catch (err) {
-                                    console.error("Failed to add ICE candidate:", err);
-                                }
-                            } else {
-                                console.log("Queuing ICE candidate:", data.candidate);
-                                pendingIceCandidates.push(data.candidate);
-                            }
-                            break;
-
-                        case "room-update":
-                            console.log(`Room update: ${data.room}, count: ${data.count}, devices: ${JSON.stringify(data.devices)}`);
-                            updatePeerInfo(data.count);
-
-                            if (data.devices && data.devices.length > 0) {
-                                const otherDevices = data.devices.filter(device => device !== localDeviceType);
-                                peerDeviceType = otherDevices.length > 0 ? otherDevices[0] : "unknown";
-                                console.log(`Updated peer device type: ${peerDeviceType}`);
-                            }
-
-                            if (isInitiator && data.count === 1 && lastPeerCount > 1) {
-                                console.log("Peer disconnected, resetting initiator state.");
-                                cleanupPeerConnection();
-                                peerDeviceType = "unknown";
-                                lastPeerCount = data.count;
-                                return;
-                            }
-
-                            if (isInitiator && data.count > lastPeerCount && data.count > 1) {
-                                console.log("Peer count increased, initiator sending new offer.");
-                                if (pc && pc.connectionState === "connected") {
-                                    console.log("Connection already established, restarting ICE.");
-                                    iceRestartCount++;
-                                    if (iceRestartCount <= MAX_ICE_RESTARTS) {
-                                        pc.restartIce();
-                                        const offer = await pc.createOffer();
-                                        await pc.setLocalDescription(offer);
-                                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                                    }
-                                } else {
-                                    if (pc) cleanupPeerConnection();
-                                    await createPeerConnection();
-                                    dc = pc.createDataChannel("file");
-                                    setupDataChannel(dc);
-                                    const offer = await pc.createOffer();
-                                    await pc.setLocalDescription(offer);
-                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                                }
-                            }
-
-                            if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
-                                console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
-                                iceRestartCount++;
-                                pc.restartIce();
-                                const offer = await pc.createOffer();
-                                await pc.setLocalDescription(offer);
-                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                            } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
-                                console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
-                                usingTurn = true;
-                                cleanupPeerConnection();
-                                await createPeerConnection();
-                                if (isInitiator) {
-                                    dc = pc.createDataChannel("file");
-                                    setupDataChannel(dc);
-                                    const offer = await pc.createOffer();
-                                    await pc.setLocalDescription(offer);
-                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                                }
-                            } else if (iceRestartCount >= MAX_ICE_RESTARTS && usingTurn) {
-                                console.log("Max ICE restarts reached with TURN, falling back to STUN-only for debugging.");
-                                usingTurn = false;
-                                cleanupPeerConnection();
-                                await createPeerConnection();
-                                if (isInitiator) {
-                                    dc = pc.createDataChannel("file");
-                                    setupDataChannel(dc);
-                                    const offer = await pc.createOffer();
-                                    await pc.setLocalDescription(offer);
-                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                                }
-                            }
-
-                            lastPeerCount = data.count;
-                            break;
-
-                        default:
-                            console.warn("Unknown message type:", data.type);
-                    }
-                } catch (err) {
-                    console.error("Error processing WebSocket message:", err);
-                }
-            })();
-        };
-    }
-
-    function retryConnection() {
-        if (retryCount >= MAX_RETRIES || isReconnecting) {
-            status.textContent = "Failed to connect to signaling server.";
-            isReconnecting = false;
-            return;
-        }
-        retryCount++;
-        status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
-        console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(connectWebSocket, 5000 * retryCount);
-    }
-
-    async function createPeerConnection() {
-        console.log("Creating new PeerConnection.");
-        if (pc && pc.signalingState !== "closed") {
-            console.log("Reusing existing PeerConnection.");
-            return;
-        }
-        const iceServers = await decideIceServers();
-        pc = new RTCPeerConnection({ iceServers });
-
-        pc.onicecandidate = ({ candidate }) => {
-            if (candidate) {
-                console.log("Sending ICE candidate:", candidate);
-                ws.send(JSON.stringify({ type: "ice-candidate", candidate, room: currentRoom }));
-            }
-        };
-
-        pc.oniceconnectionstatechange = () => {
-            console.log("ICE connection state:", pc.iceConnectionState);
-            if (pc.iceConnectionState === "failed") {
-                (async () => {
-                    status.textContent = "ICE connection failed. Attempting recovery...";
-                    console.log(`ICE failed, attempting recovery (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
-                    if (isInitiator && iceRestartCount < MAX_ICE_RESTARTS) {
-                        iceRestartCount++;
-                        pc.restartIce();
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                    } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
-                        console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
-                        usingTurn = true;
-                        cleanupPeerConnection();
-                        await createPeerConnection();
-                        if (isInitiator) {
-                            dc = pc.createDataChannel("file");
-                            setupDataChannel(dc);
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                        }
-                    } else if (usingTurn && iceRestartCount >= MAX_ICE_RESTARTS) {
-                        console.log("Max ICE restarts reached with TURN, falling back to STUN-only for debugging.");
-                        usingTurn = false;
-                        cleanupPeerConnection();
-                        await createPeerConnection();
-                        if (isInitiator) {
-                            dc = pc.createDataChannel("file");
-                            setupDataChannel(dc);
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                        }
-                    }
-                })();
-            } else if (pc.iceConnectionState === "connected") {
-                iceRestartCount = 0;
-            }
-        };
-
-        pc.onconnectionstatechange = () => {
-            console.log("Connection state:", pc.connectionState);
-            if (pc.connectionState === "connected") {
-                status.textContent = "Peer connection established.";
-                iceRestartCount = 0;
-            } else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
-                (async () => {
-                    status.textContent = "Peer connection lost.";
-                    if (isInitiator && lastPeerCount > 1) {
-                        console.log("Connection lost, attempting to re-establish with new PeerConnection.");
-                        cleanupPeerConnection();
-                        await createPeerConnection();
-                        dc = pc.createDataChannel("file");
-                        setupDataChannel(dc);
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                    }
-                })();
-            }
-        };
-
-        if (!isInitiator) {
-            pc.ondatachannel = (e) => {
-                console.log("Setting up DataChannel for non-initiator.");
-                dc = e.channel;
-                setupDataChannel(dc);
-            };
         }
     }
 
-    function cleanupPeerConnection() {
-        if (dc) {
-            dc.close();
-            dc = null;
-        }
+    // Create a new WebRTC peer connection
+    async function setupPeerConnection(useTurn) {
+        // Clean up any existing connection
         if (pc) {
-            pc.close();
-            pc = null;
+            cleanupPeerConnection();
         }
-        pendingIceCandidates = [];
-        pendingOffers = [];
-        isProcessingOffer = false;
-        sendBtn.disabled = true;
-        progressBar.style.display = "none";
-        progressBar.value = 0;
-        console.log("Cleaned up PeerConnection and DataChannel.");
+
+        isConnectingPeer = true;
+        console.log(`Creating peer connection (using TURN: ${useTurn})`);
+
+        try {
+            // Get appropriate ICE servers
+            const iceServers = await getIceServers(useTurn);
+
+            // Create the peer connection
+            pc = new RTCPeerConnection({ iceServers });
+
+            // Set up event handlers
+            pc.onicecandidate = ({ candidate }) => {
+                if (candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    console.log("Sending ICE candidate");
+                    ws.send(JSON.stringify({
+                        type: "ice-candidate",
+                        candidate,
+                        room: currentRoom
+                    }));
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                console.log("Connection state:", pc.connectionState);
+
+                if (pc.connectionState === "connected") {
+                    isConnectingPeer = false;
+                    status.textContent = "Peer connection established!";
+                } else if (pc.connectionState === "failed") {
+                    // If STUN failed, try with TURN
+                    if (!useTurn && isInitiator) {
+                        console.log("Connection failed, retrying with TURN");
+                        setupPeerConnection(true);
+                        createDataChannel();
+                        createAndSendOffer();
+                    }
+                }
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                console.log("ICE state:", pc.iceConnectionState);
+
+                if (pc.iceConnectionState === "failed" && !useTurn && isInitiator) {
+                    console.log("ICE connection failed, retrying with TURN");
+                    setupPeerConnection(true);
+                    createDataChannel();
+                    createAndSendOffer();
+                }
+            };
+
+            // Handle incoming data channels if we're not the initiator
+            if (!isInitiator) {
+                pc.ondatachannel = (event) => {
+                    console.log("Received data channel");
+                    setupDataChannel(event.channel);
+                };
+            }
+        } catch (err) {
+            console.error("Error setting up peer connection:", err);
+            isConnectingPeer = false;
+            status.textContent = "Failed to create peer connection.";
+        }
     }
 
+    // Create and send WebRTC offer
+    async function createAndSendOffer() {
+        if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        try {
+            console.log("Creating offer");
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+                type: "offer",
+                offer: pc.localDescription,
+                room: currentRoom
+            }));
+        } catch (err) {
+            console.error("Error creating offer:", err);
+        }
+    }
+
+    // Handle incoming WebRTC offer
+    async function handleRemoteOffer(offer) {
+        if (!pc) {
+            console.log("Received offer but no peer connection exists");
+            return;
+        }
+
+        try {
+            console.log("Processing remote offer");
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+            // Process any queued ICE candidates
+            while (pendingIceCandidates.length > 0) {
+                const candidate = pendingIceCandidates.shift();
+                await pc.addIceCandidate(candidate);
+            }
+
+            // Create and send answer
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            ws.send(JSON.stringify({
+                type: "answer",
+                answer: pc.localDescription,
+                room: currentRoom
+            }));
+        } catch (err) {
+            console.error("Error handling offer:", err);
+        }
+    }
+
+    // Handle incoming WebRTC answer
+    async function handleRemoteAnswer(answer) {
+        if (!pc) {
+            console.log("Received answer but no peer connection exists");
+            return;
+        }
+
+        try {
+            console.log("Setting remote description from answer");
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+            // Process any queued ICE candidates
+            while (pendingIceCandidates.length > 0) {
+                const candidate = pendingIceCandidates.shift();
+                await pc.addIceCandidate(candidate);
+            }
+        } catch (err) {
+            console.error("Error handling answer:", err);
+        }
+    }
+
+    // Handle incoming ICE candidates
+    async function handleRemoteIceCandidate(candidate) {
+        if (!pc || !candidate || !candidate.candidate) return;
+
+        try {
+            if (pc.remoteDescription) {
+                await pc.addIceCandidate(candidate);
+            } else {
+                console.log("Queuing ICE candidate");
+                pendingIceCandidates.push(candidate);
+            }
+        } catch (err) {
+            console.error("Error adding ICE candidate:", err);
+        }
+    }
+
+    // Create a data channel for file transfer
+    function createDataChannel() {
+        if (!pc) return;
+
+        try {
+            console.log("Creating data channel");
+            dc = pc.createDataChannel("file-transfer");
+            setupDataChannel(dc);
+        } catch (err) {
+            console.error("Error creating data channel:", err);
+        }
+    }
+
+    // Set up the data channel event handlers
     function setupDataChannel(channel) {
         dc = channel;
         dc.binaryType = "arraybuffer";
-        let receivedMeta = null;
+
+        // File transfer state
+        let fileMetadata = null;
         let receivedChunks = [];
         let receivedSize = 0;
         let lastProgress = 0;
 
         dc.onopen = () => {
-            console.log("DataChannel is open!");
+            console.log("Data channel open");
             sendBtn.disabled = false;
-            status.textContent = "Peer connected, ready to send files.";
-        };
-
-        dc.onmessage = (e) => {
-            console.log("DataChannel message received:", e.data);
-            if (typeof e.data === "string") {
-                try {
-                    receivedMeta = JSON.parse(e.data);
-                    console.log("Received file metadata:", receivedMeta);
-                    receivedChunks = [];
-                    receivedSize = 0;
-                    lastProgress = 0;
-                    progressBar.style.display = "block";
-                    progressBar.value = 0;
-                } catch (err) {
-                    console.error("Failed to parse metadata:", err);
-                }
-            } else if (receivedMeta) {
-                receivedChunks.push(e.data);
-                receivedSize += e.data.byteLength;
-                const progress = (receivedSize / receivedMeta.size) * 100;
-                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || receivedSize >= receivedMeta.size) {
-                    progressBar.value = progress;
-                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
-                    console.log(`Received chunk, progress: ${progress.toFixed(2)}%`);
-                }
-
-                if (receivedSize >= receivedMeta.size) {
-                    const blob = new Blob(receivedChunks, { type: receivedMeta.type });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = receivedMeta.name || "received_file";
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    receivedMeta = null;
-                    receivedChunks = [];
-                    receivedSize = 0;
-                    progressBar.style.display = "none";
-                    status.textContent = `File "${a.download}" received.`;
-                }
-            }
+            status.textContent = "Connected! Ready to send files.";
         };
 
         dc.onclose = () => {
-            console.log("DataChannel closed.");
+            console.log("Data channel closed");
             sendBtn.disabled = true;
-            progressBar.style.display = "none";
-            status.textContent = "DataChannel closed.";
-            if (isInitiator && lastPeerCount > 1) {
-                (async () => {
-                    console.log("DataChannel closed, attempting to re-establish connection.");
-                    cleanupPeerConnection();
-                    await createPeerConnection();
-                    dc = pc.createDataChannel("file");
-                    setupDataChannel(dc);
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                })();
-            }
+            status.textContent = "File transfer channel closed.";
         };
 
-        dc.onerror = (e) => {
-            console.error("DataChannel error:", e);
-            status.textContent = "DataChannel error occurred.";
+        dc.onerror = (err) => {
+            console.error("Data channel error:", err);
+            status.textContent = "Error with file transfer.";
+        };
+
+        dc.onmessage = (event) => {
+            // Handle incoming file metadata (JSON string)
+            if (typeof event.data === "string") {
+                try {
+                    fileMetadata = JSON.parse(event.data);
+                    console.log("Receiving file:", fileMetadata.name);
+                    receivedChunks = [];
+                    receivedSize = 0;
+                    lastProgress = 0;
+
+                    // Show progress bar
+                    progressBar.style.display = "block";
+                    progressBar.value = 0;
+                    status.textContent = `Receiving: ${fileMetadata.name}`;
+                } catch (err) {
+                    console.error("Error parsing file metadata:", err);
+                }
+                return;
+            }
+
+            // Handle incoming file chunks (ArrayBuffer)
+            if (fileMetadata) {
+                receivedChunks.push(event.data);
+                receivedSize += event.data.byteLength;
+
+                // Update progress
+                const progress = Math.min(100, (receivedSize / fileMetadata.size) * 100);
+                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || receivedSize >= fileMetadata.size) {
+                    progressBar.value = progress;
+                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
+                }
+
+                // File transfer complete
+                if (receivedSize >= fileMetadata.size) {
+                    const blob = new Blob(receivedChunks, { type: fileMetadata.type || "application/octet-stream" });
+                    const url = URL.createObjectURL(blob);
+
+                    // Create download link
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = fileMetadata.name;
+                    a.click();
+                    URL.revokeObjectURL(url);
+
+                    // Reset state
+                    fileMetadata = null;
+                    receivedChunks = [];
+                    receivedSize = 0;
+                    progressBar.style.display = "none";
+                    status.textContent = "File received successfully!";
+                }
+            }
         };
     }
 
-    joinRoomBtn.onclick = () => {
+    // Clean up connections
+    function cleanupPeerConnection() {
+        if (dc) {
+            dc.close();
+            dc = null;
+        }
+
+        if (pc) {
+            pc.close();
+            pc = null;
+        }
+
+        pendingIceCandidates = [];
+        isConnectingPeer = false;
+        sendBtn.disabled = true;
+        progressBar.style.display = "none";
+        progressBar.value = 0;
+    }
+
+    // Send a file in chunks
+    async function sendFile(file) {
+        if (!dc || dc.readyState !== "open") {
+            status.textContent = "Connection not ready.";
+            return;
+        }
+
+        try {
+            // Send file metadata
+            const metadata = {
+                name: file.name,
+                type: file.type,
+                size: file.size
+            };
+
+            dc.send(JSON.stringify(metadata));
+            status.textContent = `Sending: ${file.name}`;
+            console.log("Sending file:", metadata);
+
+            // Setup progress tracking
+            progressBar.style.display = "block";
+            progressBar.value = 0;
+            let lastProgress = 0;
+
+            // Read file as ArrayBuffer
+            const arrayBuffer = await file.arrayBuffer();
+            let offset = 0;
+
+            // Send file in chunks
+            while (offset < file.size) {
+                if (dc.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+                    // Wait for buffer to clear
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    continue;
+                }
+
+                // Send next chunk
+                const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
+                dc.send(chunk);
+                offset += chunk.byteLength;
+
+                // Update progress
+                const progress = Math.min(100, (offset / file.size) * 100);
+                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
+                    progressBar.value = progress;
+                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
+                }
+            }
+
+            status.textContent = "File sent successfully!";
+            setTimeout(() => {
+                progressBar.style.display = "none";
+            }, 2000);
+
+        } catch (err) {
+            console.error("Error sending file:", err);
+            status.textContent = "Error sending file.";
+            progressBar.style.display = "none";
+        }
+    }
+
+    // Join a room on the signaling server
+    function joinRoom(room) {
+        if (!room || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+        currentRoom = room;
+        console.log(`Joining room: ${room}`);
+
+        // Clean up any existing connections
+        cleanupPeerConnection();
+
+        // Send join request
+        ws.send(JSON.stringify({
+            type: "join",
+            room: room,
+            deviceType: deviceType
+        }));
+
+        status.textContent = `Joining room: ${room}`;
+    }
+
+    // Event Listeners
+    joinRoomBtn.addEventListener("click", () => {
         const room = roomInput.value.trim();
         if (!room) {
             status.textContent = "Please enter a room name.";
             return;
         }
-        if (ws?.readyState === WebSocket.OPEN) {
-            if (currentRoom !== room) {
-                cleanupPeerConnection();
-                currentRoom = room;
-            }
-            console.log(`Sending join request for room: ${room}`);
-            ws.send(JSON.stringify({ type: "join", room, deviceType: localDeviceType }));
-            status.textContent = `Joining room: ${room}`;
-        } else {
-            status.textContent = "WebSocket not connected. Reconnecting...";
-            currentRoom = room;
-            connectWebSocket();
-        }
-    };
 
-    async function sendChunkedFile(file) {
-        const arrayBuffer = await file.arrayBuffer();
-        let offset = 0;
-        let lastProgress = 0;
+        joinRoom(room);
+    });
 
-        while (offset < file.size) {
-            while (offset < file.size && dc.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-                const chunk = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
-                dc.send(chunk);
-                offset += chunk.byteLength;
-                const progress = (offset / file.size) * 100;
-                if (progress >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
-                    progressBar.value = progress;
-                    lastProgress = Math.floor(progress / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
-                    console.log(`Sent chunk, progress: ${progress.toFixed(2)}%`);
-                }
-            }
-
-            if (offset < file.size && dc.bufferedAmount >= MAX_BUFFERED_AMOUNT) {
-                console.log(`Buffer full (${dc.bufferedAmount} bytes), waiting...`);
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
-        }
-    }
-
-    sendBtn.onclick = async () => {
+    sendBtn.addEventListener("click", () => {
         const file = fileInput.files[0];
-        console.log("File selected:", file);
-        console.log("DataChannel:", dc);
-        console.log("DataChannel readyState:", dc?.readyState);
-
         if (!file) {
-            status.textContent = "No file selected.";
-            return;
-        }
-        if (!dc || dc.readyState !== "open") {
-            status.textContent = "DataChannel not ready or not connected.";
+            status.textContent = "Please select a file first.";
             return;
         }
 
-        try {
-            status.textContent = `Sending file: ${file.name}`;
-            progressBar.style.display = "block";
-            progressBar.value = 0;
+        sendFile(file);
+    });
 
-            const metadata = { name: file.name, type: file.type, size: file.size };
-            dc.send(JSON.stringify(metadata));
-            console.log("Sent metadata:", metadata);
-
-            await sendChunkedFile(file);
-
-            status.textContent = `File "${file.name}" sent successfully.`;
-            progressBar.style.display = "none";
-        } catch (err) {
-            console.error("Error sending file:", err);
-            status.textContent = "Failed to send file.";
-            progressBar.style.display = "none";
+    // Allow pressing Enter in room input
+    roomInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+            joinRoomBtn.click();
         }
-    };
+    });
 
-    function updateRoomDisplay() {
-        roomDisplay.textContent = `Room: ${currentRoom || "Not joined"}`;
-    }
-
-    function updatePeerInfo(count) {
-        peerInfo.textContent = `Peers: ${count || 0}`;
-    }
-
-    detectDeviceType();
+    // Initialize connection
     connectWebSocket();
 });

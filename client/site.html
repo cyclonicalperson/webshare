@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WebShare - Secure P2P File Sharing</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw=="
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer">
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="logo">
+      <i class="fas fa-share-nodes"></i>
+      WebShare
+    </div>
+    <div class="tagline">Secure peer-to-peer file sharing</div>
+  </div>
+
+  <div class="card room-section">
+    <div class="room-input-group">
+      <input type="text" id="roomInput" placeholder="Enter Room ID or generate one" />
+      <button id="joinRoomBtn"><i class="fas fa-sign-in-alt"></i> Join</button>
+      <button id="generateRoomBtn" title="Generate Random Room ID"><i class="fas fa-random"></i></button>
+    </div>
+    <div class="room-status">
+      <div class="status-indicator">
+        <div id="connectionDot" class="indicator-dot"></div>
+        <span id="roomDisplay">Not connected</span>
+      </div>
+      <div id="peerInfo">No peers</div>
+    </div>
+  </div>
+
+  <div class="card file-section">
+    <div class="file-input-container">
+      <input type="file" id="fileInput" class="file-input" />
+      <label for="fileInput" class="file-input-label">
+        <i class="fas fa-cloud-upload-alt"></i>
+        <span>Choose a file or drag & drop</span>
+      </label>
+    </div>
+    <div id="fileName" class="file-name"></div>
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <button id="sendBtn" disabled><i class="fas fa-paper-plane"></i> Send File</button>
+    <div id="status" class="status-message">Connect to a room to start sharing files</div>
+    <div id="transferHistory" class="transfer-history"></div>
+  </div>
+
+  <div class="card settings-section">
+    <label for="connectionMode" class="sr-only">Connection Mode</label>
+    <select id="connectionMode" class="dropdown">
+      <option value="auto">Connection: Auto</option>
+      <option value="direct">Connection: Direct (STUN)</option>
+      <option value="relay">Connection: Relay (TURN)</option>
+    </select>
+    <button id="themeToggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle dark/light theme">
+      <i class="fas fa-moon"></i>
+    </button>
+  </div>
+
+  <div class="encryption-info">
+    <i class="fas fa-lock"></i>
+    <span>End-to-end encrypted. Files never pass through our servers.</span>
+  </div>
+</div>
+
+<div class="footer">
+  <p>© 2025 WebShare | <a href="#" id="aboutLink" style="color: inherit;">About</a></p>
+</div>
+
+<script src="client.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>
