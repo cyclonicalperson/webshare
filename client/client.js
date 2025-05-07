@@ -34,48 +34,43 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!response.ok) {
                 console.error(`HTTP error: ${response.status}`);
                 status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
-                return {
-                    urls: [
-                        "stun:stun.l.google.com:19302",
-                        "stun:stun1.l.google.com:3478"
-                    ]
-                };
+                return [
+                    {
+                        urls: [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:3478"
+                        ]
+                    }
+                ];
             }
 
             const data = await response.json();
-            if (!data.uris) {
+            if (!Array.isArray(data) || !data[0]?.urls) {
                 console.error("Invalid credentials received:", data);
                 status.textContent = "Invalid credentials received. Using STUN servers.";
-                return {
+                return [
+                    {
+                        urls: [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:3478"
+                        ]
+                    }
+                ];
+            }
+
+            console.log("Received ICE servers:", data);
+            return data; // Return the array of RTCIceServer objects
+        } catch (error) {
+            console.error("Failed to fetch TURN credentials:", error.message);
+            status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
+            return [
+                {
                     urls: [
                         "stun:stun.l.google.com:19302",
                         "stun:stun1.l.google.com:3478"
                     ]
-                };
-            }
-
-            if (!data.username || !data.password) {
-                console.log("Using STUN-only servers:", data.uris);
-                return {
-                    urls: data.uris
-                };
-            }
-
-            console.log("Received TURN credentials:", data);
-            return {
-                username: data.username,
-                credential: data.password,
-                urls: data.uris
-            };
-        } catch (error) {
-            console.error("Failed to fetch TURN credentials:", error.message);
-            status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
-            return {
-                urls: [
-                    "stun:stun.l.google.com:19302",
-                    "stun:stun1.l.google.com:3478"
-                ]
-            };
+                }
+            ];
         }
     }
 
@@ -265,21 +260,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
-        const turnCredentials = await fetchTurnCredentials();
-        if (!turnCredentials || !turnCredentials.urls) {
+        const iceServers = await fetchTurnCredentials();
+        if (!iceServers || !Array.isArray(iceServers) || !iceServers[0]?.urls) {
             console.error("Cannot create PeerConnection without ICE servers.");
             status.textContent = "Failed to create peer connection.";
             return;
         }
 
         pc = new RTCPeerConnection({
-            iceServers: [
-                {
-                    urls: turnCredentials.urls,
-                    username: turnCredentials.username || "",
-                    credential: turnCredentials.credential || ""
-                }
-            ],
+            iceServers: iceServers,
             iceCandidatePoolSize: 10 // Increase for longer ICE gathering
         });
 
