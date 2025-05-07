@@ -18,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let pendingIceCandidates = [];
     let isReconnecting = false;
     let iceRestartCount = 0;
-    const MAX_ICE_RESTARTS = 3;
+    const MAX_ICE_RESTARTS = 1; // Reduced to switch to TURN faster
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
@@ -222,19 +222,31 @@ document.addEventListener("DOMContentLoaded", () => {
                                 return;
                             }
 
-                            // Detect new peer joining after a disconnect or initial join
-                            if (isInitiator && data.count > 1 && (lastPeerCount === 1 || lastPeerCount === 0)) {
-                                console.log("New peer joined, creating new PeerConnection.");
-                                cleanupPeerConnection();
-                                await createPeerConnection();
-                                dc = pc.createDataChannel("file");
-                                setupDataChannel(dc);
-                                const offer = await pc.createOffer();
-                                await pc.setLocalDescription(offer);
-                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                            }
-                            // Handle ICE restarts if connection is not established
-                            else if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
+                            // Ensure initiator sends a new offer whenever a peer joins or rejoins
+                            if (isInitiator && data.count > 1) {
+                                console.log("Peer count increased, initiator sending new offer.");
+                                if (pc && pc.connectionState === "connected") {
+                                    // If already connected, just restart ICE
+                                    iceRestartCount++;
+                                    if (iceRestartCount < MAX_ICE_RESTARTS) {
+                                        console.log(`Restarting ICE (attempt ${iceRestartCount}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
+                                        pc.restartIce();
+                                        const offer = await pc.createOffer();
+                                        await pc.setLocalDescription(offer);
+                                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                                    }
+                                } else {
+                                    // If not connected, create a new PeerConnection
+                                    console.log("Creating new PeerConnection for new peer.");
+                                    cleanupPeerConnection();
+                                    await createPeerConnection();
+                                    dc = pc.createDataChannel("file");
+                                    setupDataChannel(dc);
+                                    const offer = await pc.createOffer();
+                                    await pc.setLocalDescription(offer);
+                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                                }
+                            } else if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
                                 console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
                                 iceRestartCount++;
                                 pc.restartIce();
