@@ -17,27 +17,70 @@ document.addEventListener("DOMContentLoaded", () => {
     let retryCount = 0;
     let pendingIceCandidates = [];
     let isReconnecting = false;
+    let iceRestartCount = 0;
+    const MAX_ICE_RESTARTS = 3;
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
     const WS_TIMEOUT = 20000; // 20s for Koyeb wakeup
+    let usingTurn = false;
+    let turnCredentials = null;
 
-    async function fetchIceServers() {
+    async function fetchIceServers(useTurn = false) {
+        if (!useTurn) {
+            console.log("Attempting STUN-only connection.");
+            return [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:3478" }
+            ];
+        }
+
+        if (turnCredentials) {
+            console.log("Using cached TURN credentials.");
+            return turnCredentials;
+        }
+
         try {
+            console.log("Fetching ICE servers with TURN...");
             const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/turn-credentials");
             if (!response.ok) {
-                console.error(`HTTP error fetching ICE servers, status: ${response.status}`);
+                console.error(`HTTP error fetching ICE servers, status: ${response.status}, text: ${await response.text()}`);
                 return [
                     { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "stun:stun1.l.google.com:3478" }
+                    {
+                        urls: "turn:openrelay.metered.ca:443",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    }
                 ];
             }
-            return await response.json();
+            const iceServers = await response.json();
+            console.log("Fetched ICE servers:", iceServers);
+            // Prioritize TURN servers on port 443, then any TURN, then STUN
+            const turnServer = iceServers.find(server => server.urls.includes("turn:") && server.urls.includes(":443")) ||
+                iceServers.find(server => server.urls.includes("turn:"));
+            const stunServer = iceServers.find(server => server.urls.includes("stun:"));
+            const selectedServers = [];
+            if (turnServer) selectedServers.push(turnServer);
+            if (stunServer) selectedServers.push(stunServer);
+            turnCredentials = selectedServers.length > 0 ? selectedServers : [
+                { urls: "stun:stun.l.google.com:19302" },
+                {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
+            ];
+            return turnCredentials;
         } catch (err) {
             console.error("Failed to fetch ICE servers:", err);
             return [
                 { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:3478" }
+                {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
             ];
         }
     }
@@ -93,6 +136,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
                         currentRoom = data.room;
                         isInitiator = data.initiator;
+                        iceRestartCount = 0;
+                        usingTurn = false;
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
@@ -170,12 +215,25 @@ document.addEventListener("DOMContentLoaded", () => {
                     case "room-update":
                         console.log(`Room update: ${data.room}, count: ${data.count}`);
                         updatePeerInfo(data.count);
-                        if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected") {
-                            console.log("New peer joined, restarting ICE as initiator.");
+                        if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
+                            console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
+                            iceRestartCount++;
                             pc.restartIce();
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
                             ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                        } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
+                            console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
+                            usingTurn = true;
+                            cleanupPeerConnection();
+                            await createPeerConnection();
+                            if (isInitiator) {
+                                dc = pc.createDataChannel("file");
+                                setupDataChannel(dc);
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            }
                         }
                         break;
 
@@ -202,7 +260,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
-        const iceServers = await fetchIceServers();
+        const iceServers = await fetchIceServers(usingTurn);
         pc = new RTCPeerConnection({ iceServers });
 
         pc.onicecandidate = ({ candidate }) => {
@@ -216,13 +274,28 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log("ICE connection state:", pc.iceConnectionState);
             if (pc.iceConnectionState === "failed") {
                 status.textContent = "ICE connection failed. Restarting...";
-                console.log("ICE failed, attempting restart.");
-                if (isInitiator) {
+                console.log(`ICE failed, attempting restart (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
+                if (isInitiator && iceRestartCount < MAX_ICE_RESTARTS) {
+                    iceRestartCount++;
                     pc.restartIce();
                     pc.createOffer().then(offer => {
                         pc.setLocalDescription(offer);
                         ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                     }).catch(err => console.error("Failed to restart ICE:", err));
+                } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
+                    console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
+                    usingTurn = true;
+                    cleanupPeerConnection();
+                    createPeerConnection().then(() => {
+                        if (isInitiator) {
+                            dc = pc.createDataChannel("file");
+                            setupDataChannel(dc);
+                            pc.createOffer().then(offer => {
+                                pc.setLocalDescription(offer);
+                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            }).catch(err => console.error("Failed to create offer:", err));
+                        }
+                    });
                 }
             }
         };
@@ -231,11 +304,20 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log("Connection state:", pc.connectionState);
             if (pc.connectionState === "connected") {
                 status.textContent = "Peer connection established.";
+                iceRestartCount = 0; // Reset restart count on successful connection
             } else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
                 status.textContent = "Peer connection lost.";
                 cleanupPeerConnection();
             }
         };
+
+        if (!isInitiator) {
+            pc.ondatachannel = (e) => {
+                console.log("Setting up DataChannel for non-initiator.");
+                dc = e.channel;
+                setupDataChannel(dc);
+            };
+        }
     }
 
     function cleanupPeerConnection() {

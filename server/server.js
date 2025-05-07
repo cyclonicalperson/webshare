@@ -8,8 +8,10 @@ const rooms = new Map();
 const clientRoom = new Map();
 
 // CORS middleware
-function setCORSHeaders(res) {
-    res.setHeader('Access-Control-Allow-Origin', 'https://websharer.netlify.app');
+function setCORSHeaders(res, origin) {
+    const allowedOrigins = ['https://websharer.netlify.app', 'http://localhost:8000', 'http://localhost:8080', 'http://127.0.0.1:8000', 'http://127.0.0.1:8080'];
+    const corsOrigin = allowedOrigins.includes(origin) ? origin : 'https://websharer.netlify.app';
+    res.setHeader('Access-Control-Allow-Origin', corsOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
@@ -31,7 +33,13 @@ function broadcastRoomInfo(roomId) {
             client.send(message);
         } else {
             console.log(`Client in room ${roomId} is not open, state: ${client.readyState}`);
+            clients.delete(client);
+            clientRoom.delete(client);
         }
+    }
+    if (clients.size === 0) {
+        rooms.delete(roomId);
+        console.log(`Deleted empty room: ${roomId}`);
     }
 }
 
@@ -81,10 +89,6 @@ wss.on('connection', (ws) => {
                 console.log(`Removing client from previous room: ${prevRoom}`);
                 rooms.get(prevRoom).delete(ws);
                 broadcastRoomInfo(prevRoom);
-                if (rooms.get(prevRoom).size === 0) {
-                    rooms.delete(prevRoom);
-                    console.log(`Deleted empty room: ${prevRoom}`);
-                }
             }
 
             // Join new room
@@ -121,46 +125,51 @@ wss.on('connection', (ws) => {
         if (roomId && rooms.has(roomId)) {
             console.log(`Client disconnected from room: ${roomId}`);
             rooms.get(roomId).delete(ws);
-            if (rooms.get(roomId).size === 0) {
-                rooms.delete(roomId);
-                console.log(`Deleted empty room: ${roomId}`);
-            } else {
-                broadcastRoomInfo(roomId);
-            }
+            broadcastRoomInfo(roomId);
         }
         clientRoom.delete(ws);
     });
 
     ws.on('error', (err) => {
         console.error("WebSocket error:", err);
+        const roomId = clientRoom.get(ws);
+        if (roomId && rooms.has(roomId)) {
+            rooms.get(roomId).delete(ws);
+            broadcastRoomInfo(roomId);
+        }
+        clientRoom.delete(ws);
     });
 });
 
 // Endpoint to fetch TURN credentials
 server.on('request', async (req, res) => {
     if (req.url === '/turn-credentials' && req.method === 'GET') {
-        setCORSHeaders(res);
+        setCORSHeaders(res, req.headers.origin);
         const apiKey = process.env.METERED_API_KEY;
+        console.log(`Using METERED_API_KEY: ${apiKey ? apiKey.slice(0, 8) + '... (hidden)' : 'not set'}`);
         if (!apiKey) {
             console.error("METERED_API_KEY not set");
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: "Server configuration error" }));
+            res.end(JSON.stringify({ error: "Server configuration error: METERED_API_KEY not set" }));
             return;
         }
         try {
             const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
             if (!response.ok) {
-                console.error(`HTTP error fetching TURN credentials, status: ${response.status}`);
+                const errorText = await response.text();
+                console.error(`HTTP error fetching TURN credentials, status: ${response.status}, text: ${errorText}`);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: "Failed to fetch TURN credentials" }));
+                res.end(JSON.stringify({ error: `Failed to fetch TURN credentials: ${errorText}` }));
                 return;
             }
+            const iceServers = await response.json();
+            console.log("Serving ICE servers:", iceServers);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(await response.json()));
+            res.end(JSON.stringify(iceServers));
         } catch (err) {
             console.error("Failed to fetch TURN credentials:", err);
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: "Failed to fetch TURN credentials" }));
+            res.end(JSON.stringify({ error: "Failed to fetch TURN credentials: " + err.message }));
         }
     } else {
         res.writeHead(404);
