@@ -53,41 +53,72 @@ app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
     }
 
     console.log(`Credential request from ${req.ip}`);
-    try {
-        // Try GET first
-        let response = await fetch(
-            `https://webshare.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
-            {
-                method: "GET",
-                headers: {
-                    "Accept": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0"
-                }
-            }
-        );
-        console.log("Metered API GET response status:", response.status);
+    const maxRetries = 3;
+    let attempt = 0;
 
-        if (!response.ok) {
-            const errorText = await response.text().catch(() => "No response body");
-            console.error("Metered API GET error details:", errorText);
-            // Try POST as fallback
-            console.log("Retrying with POST...");
-            response = await fetch(
+    while (attempt < maxRetries) {
+        attempt++;
+        console.log(`Fetching TURN credentials, attempt ${attempt}/${maxRetries}`);
+        try {
+            const response = await fetch(
                 `https://webshare.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
                 {
-                    method: "POST",
+                    method: "GET",
                     headers: {
                         "Accept": "application/json",
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0"
                     }
                 }
             );
-            console.log("Metered API POST response status:", response.status);
+            console.log("Metered API response status:", response.status);
+            console.log("Metered API response headers:", Object.fromEntries(response.headers));
 
             if (!response.ok) {
-                const postErrorText = await response.text().catch(() => "No response body");
-                console.error("Metered API POST error details:", postErrorText);
-                // Fallback to STUN-only servers
+                const errorText = await response.text().catch(() => "No response body");
+                console.error(`Metered API error (attempt ${attempt}):`, response.status, errorText);
+                if (attempt === maxRetries) {
+                    console.error("Max retries reached, falling back to STUN servers.");
+                    return res.status(200).json([
+                        {
+                            urls: [
+                                "stun:stun.l.google.com:19302",
+                                "stun:stun1.l.google.com:3478"
+                            ]
+                        }
+                    ]);
+                }
+                // Wait before retrying
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                continue;
+            }
+
+            const data = await response.json();
+            console.log("Metered API response data:", data);
+
+            // Validate response as an array of ICE servers
+            if (!Array.isArray(data) || !data[0]?.urls || !data[0].username || !data[0].credential) {
+                console.error(`Invalid TURN credentials received (attempt ${attempt}):`, data);
+                if (attempt === maxRetries) {
+                    console.error("Max retries reached, falling back to STUN servers.");
+                    return res.status(200).json([
+                        {
+                            urls: [
+                                "stun:stun.l.google.com:19302",
+                                "stun:stun1.l.google.com:3478"
+                            ]
+                        }
+                    ]);
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                continue;
+            }
+
+            res.json(data); // Return the array as-is
+            return;
+        } catch (error) {
+            console.error(`Error fetching TURN credentials (attempt ${attempt}):`, error.message);
+            if (attempt === maxRetries) {
+                console.error("Max retries reached, falling back to STUN servers.");
                 return res.status(200).json([
                     {
                         urls: [
@@ -97,37 +128,8 @@ app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
                     }
                 ]);
             }
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
-
-        const data = await response.json();
-        console.log("Metered API response data:", data);
-
-        // Validate response as an array of ICE servers
-        if (!Array.isArray(data) || !data[0]?.urls || !data[0].username || !data[0].credential) {
-            console.error("Invalid TURN credentials received from Metered API:", data);
-            // Fallback to STUN-only servers
-            return res.status(200).json([
-                {
-                    urls: [
-                        "stun:stun.l.google.com:19302",
-                        "stun:stun1.l.google.com:3478"
-                    ]
-                }
-            ]);
-        }
-
-        res.json(data); // Return the array as-is
-    } catch (error) {
-        console.error("Error fetching TURN credentials:", error.message);
-        // Fallback to STUN-only servers
-        return res.status(200).json([
-            {
-                urls: [
-                    "stun:stun.l.google.com:19302",
-                    "stun:stun1.l.google.com:3478"
-                ]
-            }
-        ]);
     }
 });
 

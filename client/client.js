@@ -22,6 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
+    const SIGNALING_TIMEOUT = 10000; // 10s timeout for signaling
 
     async function fetchTurnCredentials() {
         console.log("Fetching TURN credentials...");
@@ -128,7 +129,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        if (!pc || pc.connectionState !== "connected") {
+                        // Only create PeerConnection if not already connected or connecting
+                        if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed") {
                             cleanupPeerConnection();
                             await createPeerConnection();
                         }
@@ -139,6 +141,14 @@ document.addEventListener("DOMContentLoaded", () => {
                                 dc = e.channel;
                                 setupDataChannel(dc);
                             };
+                            // Set a timeout to detect stalled signaling
+                            setTimeout(() => {
+                                if (pc && pc.connectionState !== "connected" && !dc) {
+                                    console.warn("Signaling stalled, restarting PeerConnection.");
+                                    cleanupPeerConnection();
+                                    createPeerConnection();
+                                }
+                            }, SIGNALING_TIMEOUT);
                         } else {
                             console.log("Creating DataChannel as initiator.");
                             dc = pc.createDataChannel("file");
@@ -152,7 +162,9 @@ document.addEventListener("DOMContentLoaded", () => {
                         break;
 
                     case "offer":
-                        if (!pc) await createPeerConnection();
+                        if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed") {
+                            await createPeerConnection();
+                        }
                         console.log("Received offer, setting remote description.");
                         try {
                             if (Date.now() - lastOfferTime < OFFER_RETRY_DELAY) {
@@ -275,6 +287,8 @@ document.addEventListener("DOMContentLoaded", () => {
         pc.onicecandidate = ({ candidate }) => {
             if (candidate && candidate.candidate) {
                 console.log("Sending ICE candidate:", candidate);
+                const candidateType = candidate.candidate.match(/typ (\w+)/)?.[1];
+                console.log("ICE candidate type:", candidateType);
                 ws.send(JSON.stringify({ type: "ice-candidate", candidate, room: currentRoom }));
             } else {
                 console.log("Ignoring empty ICE candidate");
