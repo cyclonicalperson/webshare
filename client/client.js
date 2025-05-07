@@ -18,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let pendingIceCandidates = [];
     let isReconnecting = false;
     let iceRestartCount = 0;
-    const MAX_ICE_RESTARTS = 1; // Reduced to switch to TURN faster
+    const MAX_ICE_RESTARTS = 1;
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
@@ -26,6 +26,17 @@ document.addEventListener("DOMContentLoaded", () => {
     let usingTurn = false;
     let turnCredentials = null;
     let lastPeerCount = 0;
+    let peerDeviceType = "unknown"; // Track the other peer's device type
+    let localDeviceType = "desktop"; // Default to desktop
+
+    // Detect if the client is mobile
+    function detectDeviceType() {
+        const ua = navigator.userAgent.toLowerCase();
+        const isMobile = /mobile|android|iphone|ipad|tablet|ipod|blackberry|windows phone/.test(ua);
+        localDeviceType = isMobile ? "mobile" : "desktop";
+        console.log(`Detected device type: ${localDeviceType}`);
+        return localDeviceType;
+    }
 
     async function fetchIceServers(useTurn = false) {
         if (!useTurn) {
@@ -81,6 +92,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    // Decide whether to use TURN based on device types
+    async function decideIceServers() {
+        // Use TURN if either peer is mobile
+        const useTurn = localDeviceType === "mobile" || peerDeviceType === "mobile";
+        console.log(`Deciding ICE servers: local=${localDeviceType}, peer=${peerDeviceType}, useTurn=${useTurn}`);
+        return await fetchIceServers(useTurn);
+    }
+
     function connectWebSocket() {
         if (isReconnecting || ws?.readyState === WebSocket.OPEN) return;
         isReconnecting = true;
@@ -102,7 +121,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }, 30000);
             if (currentRoom) {
                 console.log(`Joining room: ${currentRoom}`);
-                ws.send(JSON.stringify({ type: "join", room: currentRoom }));
+                ws.send(JSON.stringify({ type: "join", room: currentRoom, deviceType: localDeviceType }));
             }
         };
 
@@ -139,7 +158,6 @@ document.addEventListener("DOMContentLoaded", () => {
                             updateRoomDisplay();
                             updatePeerInfo(data.count);
 
-                            cleanupPeerConnection();
                             await createPeerConnection();
 
                             if (isInitiator) {
@@ -211,42 +229,42 @@ document.addEventListener("DOMContentLoaded", () => {
                             break;
 
                         case "room-update":
-                            console.log(`Room update: ${data.room}, count: ${data.count}`);
+                            console.log(`Room update: ${data.room}, count: ${data.count}, devices: ${JSON.stringify(data.devices)}`);
                             updatePeerInfo(data.count);
 
-                            // Detect peer disconnect and reset initiator state
+                            // Update peer device type
+                            if (data.devices && data.devices.length > 0) {
+                                // Filter out our own device type to get the peer's
+                                const otherDevices = data.devices.filter(device => device !== localDeviceType);
+                                peerDeviceType = otherDevices.length > 0 ? otherDevices[0] : "unknown";
+                                console.log(`Updated peer device type: ${peerDeviceType}`);
+                            }
+
+                            // Detect peer disconnect
                             if (isInitiator && data.count === 1 && lastPeerCount > 1) {
                                 console.log("Peer disconnected, resetting initiator state.");
                                 cleanupPeerConnection();
+                                peerDeviceType = "unknown";
                                 lastPeerCount = data.count;
                                 return;
                             }
 
-                            // Ensure initiator sends a new offer whenever a peer joins or rejoins
-                            if (isInitiator && data.count > 1) {
+                            // Initiator sends a new offer when peer count increases
+                            if (isInitiator && data.count > lastPeerCount && data.count > 1) {
                                 console.log("Peer count increased, initiator sending new offer.");
-                                if (pc && pc.connectionState === "connected") {
-                                    // If already connected, just restart ICE
-                                    iceRestartCount++;
-                                    if (iceRestartCount < MAX_ICE_RESTARTS) {
-                                        console.log(`Restarting ICE (attempt ${iceRestartCount}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
-                                        pc.restartIce();
-                                        const offer = await pc.createOffer();
-                                        await pc.setLocalDescription(offer);
-                                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                                    }
-                                } else {
-                                    // If not connected, create a new PeerConnection
-                                    console.log("Creating new PeerConnection for new peer.");
+                                if (pc) {
                                     cleanupPeerConnection();
-                                    await createPeerConnection();
-                                    dc = pc.createDataChannel("file");
-                                    setupDataChannel(dc);
-                                    const offer = await pc.createOffer();
-                                    await pc.setLocalDescription(offer);
-                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                                 }
-                            } else if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
+                                await createPeerConnection();
+                                dc = pc.createDataChannel("file");
+                                setupDataChannel(dc);
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            }
+
+                            // Handle ICE failure recovery
+                            if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
                                 console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
                                 iceRestartCount++;
                                 pc.restartIce();
@@ -256,6 +274,18 @@ document.addEventListener("DOMContentLoaded", () => {
                             } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
                                 console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
                                 usingTurn = true;
+                                cleanupPeerConnection();
+                                await createPeerConnection();
+                                if (isInitiator) {
+                                    dc = pc.createDataChannel("file");
+                                    setupDataChannel(dc);
+                                    const offer = await pc.createOffer();
+                                    await pc.setLocalDescription(offer);
+                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                                }
+                            } else if (iceRestartCount >= MAX_ICE_RESTARTS && usingTurn) {
+                                console.log("Max ICE restarts reached with TURN, falling back to STUN-only for debugging.");
+                                usingTurn = false;
                                 cleanupPeerConnection();
                                 await createPeerConnection();
                                 if (isInitiator) {
@@ -294,7 +324,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
-        const iceServers = await fetchIceServers(usingTurn);
+        const iceServers = await decideIceServers();
         pc = new RTCPeerConnection({ iceServers });
 
         pc.onicecandidate = ({ candidate }) => {
@@ -329,7 +359,8 @@ document.addEventListener("DOMContentLoaded", () => {
                             ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                         }
                     } else if (usingTurn && iceRestartCount >= MAX_ICE_RESTARTS) {
-                        console.log("Max ICE restarts reached with TURN, resetting connection.");
+                        console.log("Max ICE restarts reached with TURN, falling back to STUN-only for debugging.");
+                        usingTurn = false;
                         cleanupPeerConnection();
                         await createPeerConnection();
                         if (isInitiator) {
@@ -485,7 +516,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 currentRoom = room;
             }
             console.log(`Sending join request for room: ${room}`);
-            ws.send(JSON.stringify({ type: "join", room }));
+            ws.send(JSON.stringify({ type: "join", room, deviceType: localDeviceType }));
             status.textContent = `Joining room: ${room}`;
         } else {
             status.textContent = "WebSocket not connected. Reconnecting...";
@@ -562,5 +593,6 @@ document.addEventListener("DOMContentLoaded", () => {
         peerInfo.textContent = `Peers: ${count || 0}`;
     }
 
+    detectDeviceType(); // Detect device type on load
     connectWebSocket();
 });

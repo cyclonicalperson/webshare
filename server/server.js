@@ -6,6 +6,7 @@ const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 const rooms = new Map();
 const clientRoom = new Map();
+const clientDeviceType = new Map(); // Map to store device types for each client
 
 // CORS middleware
 function setCORSHeaders(res, origin) {
@@ -22,12 +23,15 @@ function broadcastRoomInfo(roomId) {
         console.log(`No clients in room ${roomId}`);
         return;
     }
+    // Collect device types of all clients in the room
+    const devices = Array.from(clients).map(client => clientDeviceType.get(client) || 'unknown');
     const message = JSON.stringify({
         type: 'room-update',
         room: roomId,
         count: clients.size,
+        devices: devices
     });
-    console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}`);
+    console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}, devices: ${devices}`);
     for (const client of clients) {
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);
@@ -35,6 +39,7 @@ function broadcastRoomInfo(roomId) {
             console.log(`Client in room ${roomId} is not open, state: ${client.readyState}`);
             clients.delete(client);
             clientRoom.delete(client);
+            clientDeviceType.delete(client);
         }
     }
     if (clients.size === 0) {
@@ -83,6 +88,11 @@ wss.on('connection', (ws) => {
                 return;
             }
 
+            // Store device type
+            const deviceType = msg.deviceType || 'unknown';
+            clientDeviceType.set(ws, deviceType);
+            console.log(`Client device type: ${deviceType}`);
+
             // Clean up previous room
             const prevRoom = clientRoom.get(ws);
             if (prevRoom && prevRoom !== roomId && rooms.has(prevRoom)) {
@@ -128,6 +138,7 @@ wss.on('connection', (ws) => {
             broadcastRoomInfo(roomId);
         }
         clientRoom.delete(ws);
+        clientDeviceType.delete(ws);
     });
 
     ws.on('error', (err) => {
@@ -138,6 +149,7 @@ wss.on('connection', (ws) => {
             broadcastRoomInfo(roomId);
         }
         clientRoom.delete(ws);
+        clientDeviceType.delete(ws);
     });
 });
 
