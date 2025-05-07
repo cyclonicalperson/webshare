@@ -24,33 +24,58 @@ document.addEventListener("DOMContentLoaded", () => {
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
 
     async function fetchTurnCredentials() {
+        console.log("Fetching TURN credentials...");
         try {
-            console.log("Fetching TURN credentials...");
             const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/get-turn-credentials", {
                 method: "GET",
                 headers: { "Content-Type": "application/json" }
             });
+
             if (!response.ok) {
                 console.error(`HTTP error: ${response.status}`);
-                status.textContent = "Failed to fetch TURN credentials. Please try again.";
-                return null;
+                status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
+                return {
+                    urls: [
+                        "stun:stun.l.google.com:19302",
+                        "stun:stun1.l.google.com:3478"
+                    ]
+                };
             }
+
             const data = await response.json();
-            if (!data.username || !data.password || !data.uris) {
-                console.error("Invalid TURN credentials received");
-                status.textContent = "Failed to fetch TURN credentials. Please try again.";
-                return null;
+            if (!data.uris) {
+                console.error("Invalid credentials received:", data);
+                status.textContent = "Invalid credentials received. Using STUN servers.";
+                return {
+                    urls: [
+                        "stun:stun.l.google.com:19302",
+                        "stun:stun1.l.google.com:3478"
+                    ]
+                };
             }
+
+            if (!data.username || !data.password) {
+                console.log("Using STUN-only servers:", data.uris);
+                return {
+                    urls: data.uris
+                };
+            }
+
             console.log("Received TURN credentials:", data);
             return {
                 username: data.username,
                 credential: data.password,
                 urls: data.uris
             };
-        } catch (err) {
-            console.error("Failed to fetch TURN credentials:", err);
-            status.textContent = "Failed to fetch TURN credentials. Please try again.";
-            return null;
+        } catch (error) {
+            console.error("Failed to fetch TURN credentials:", error.message);
+            status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
+            return {
+                urls: [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun1.l.google.com:3478"
+                ]
+            };
         }
     }
 
@@ -241,20 +266,18 @@ document.addEventListener("DOMContentLoaded", () => {
     async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
         const turnCredentials = await fetchTurnCredentials();
-        if (!turnCredentials) {
-            console.error("Cannot create PeerConnection without TURN credentials.");
+        if (!turnCredentials || !turnCredentials.urls) {
+            console.error("Cannot create PeerConnection without ICE servers.");
             status.textContent = "Failed to create peer connection.";
             return;
         }
 
         pc = new RTCPeerConnection({
             iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:3478" },
                 {
                     urls: turnCredentials.urls,
-                    username: turnCredentials.username,
-                    credential: turnCredentials.credential
+                    username: turnCredentials.username || "",
+                    credential: turnCredentials.credential || ""
                 }
             ],
             iceCandidatePoolSize: 10 // Increase for longer ICE gathering

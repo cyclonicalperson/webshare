@@ -14,6 +14,7 @@ app.set("trust proxy", true);
 const METERED_API_KEY = process.env.METERED_API_KEY;
 console.log("Environment variables:", Object.keys(process.env));
 console.log("METERED_API_KEY loaded:", !!METERED_API_KEY);
+console.log("METERED_API_KEY length:", METERED_API_KEY?.length);
 
 // Enable CORS for all origins (or specify: ["https://websharer.netlify.app"])
 app.use(cors({
@@ -41,41 +42,59 @@ app.get("/get-turn-credentials", credentialLimiter, async (req, res) => {
         return res.status(500).json({ error: "Metered API key not configured." });
     }
 
+    if (METERED_API_KEY.length !== 35) {
+        console.error("Invalid METERED_API_KEY length:", METERED_API_KEY.length);
+        return res.status(500).json({ error: "Invalid Metered API key format." });
+    }
+
     console.log(`Credential request from ${req.ip}`);
     try {
         const response = await fetch(
             `https://webshare.metered.live/api/v1/turn/credentials?apiKey=${METERED_API_KEY}`,
-            { method: "POST" }
+            { method: "GET" }
         );
         console.log("Metered API response status:", response.status);
 
         if (!response.ok) {
             const errorText = await response.text().catch(() => "No response body");
             console.error("Metered API error details:", errorText);
-            return res.status(500).json({
-                error: `Metered API error: ${response.status}`,
-                details: errorText || "Unknown error from Metered API"
+            // Fallback to STUN-only servers
+            return res.status(200).json({
+                uris: [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun1.l.google.com:3478"
+                ]
             });
         }
 
         const data = await response.json();
         console.log("Metered API response data:", data);
 
-        if (!data.username || !data.password || !data.uris) {
+        // Metered returns an array of ICE servers
+        if (!Array.isArray(data) || !data[0]?.urls || !data[0].username || !data[0].credential) {
             console.error("Invalid TURN credentials received from Metered API:", data);
-            return res.status(500).json({ error: "Invalid TURN credentials received." });
+            // Fallback to STUN-only servers
+            return res.status(200).json({
+                uris: [
+                    "stun:stun.l.google.com:19302",
+                    "stun:stun1.l.google.com:3478"
+                ]
+            });
         }
 
         res.json({
-            username: data.username,
-            password: data.password,
-            uris: data.uris
+            username: data[0].username,
+            password: data[0].credential,
+            uris: data[0].urls
         });
     } catch (error) {
         console.error("Error fetching TURN credentials:", error.message);
-        res.status(500).json({
-            error: "Failed to fetch TURN credentials",
-            details: error.message || "Unexpected error"
+        // Fallback to STUN-only servers
+        return res.status(200).json({
+            uris: [
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:3478"
+            ]
         });
     }
 });
