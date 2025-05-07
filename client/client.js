@@ -20,6 +20,23 @@ document.addEventListener("DOMContentLoaded", () => {
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
+    const WS_TIMEOUT = 20000; // 20s for Koyeb wakeup
+
+    async function fetchIceServers() {
+        try {
+            const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/turn-credentials");
+            const iceServers = await response.json();
+            return iceServers;
+        } catch (err) {
+            console.error("Failed to fetch ICE servers:", err);
+            // Fallback to public STUN servers
+            return [
+                { urls: "stun:stun.relay.metered.ca:80" },
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:3478" }
+            ];
+        }
+    }
 
     function connectWebSocket() {
         if (isReconnecting) return;
@@ -27,6 +44,7 @@ document.addEventListener("DOMContentLoaded", () => {
         status.textContent = "Connecting to signaling server...";
         console.log("Attempting WebSocket connection...");
         ws = new WebSocket("wss://primary-tove-arsenijevicdev-4f187706.koyeb.app");
+        ws.timeout = WS_TIMEOUT;
 
         ws.onopen = () => {
             retryCount = 0;
@@ -173,26 +191,13 @@ document.addEventListener("DOMContentLoaded", () => {
         retryCount++;
         status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
         console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(connectWebSocket, 5000 * retryCount); // Increased to 5s
+        setTimeout(connectWebSocket, 5000 * retryCount);
     }
 
-    function createPeerConnection() {
+    async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
-        pc = new RTCPeerConnection({
-            iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:3478" },
-                {
-                    urls: [
-                        "turn:openrelay.metered.ca:80",
-                        "turn:openrelay.metered.ca:443",
-                        "turn:openrelay.metered.ca:443?transport=tcp"
-                    ],
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }
-            ]
-        });
+        const iceServers = await fetchIceServers();
+        pc = new RTCPeerConnection({ iceServers });
 
         pc.onicecandidate = ({ candidate }) => {
             if (candidate) {

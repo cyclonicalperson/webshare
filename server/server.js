@@ -1,6 +1,9 @@
 const WebSocket = require('ws');
-const wss = new WebSocket.Server({ port: process.env.PORT || 3000 });
+const http = require('http');
+const fetch = require('node-fetch');
 
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
 const rooms = new Map();
 const clientRoom = new Map();
 
@@ -126,4 +129,30 @@ wss.on('connection', (ws) => {
     });
 });
 
-console.log('WebSocket signaling server running on port 3000');
+// Endpoint to fetch TURN credentials
+server.on('request', async (req, res) => {
+    if (req.url === '/turn-credentials' && req.method === 'GET') {
+        try {
+            const apiKey = process.env.METERED_API_KEY;
+            if (!apiKey) {
+                throw new Error("METERED_API_KEY not set");
+            }
+            const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
+            const iceServers = await response.json();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(iceServers));
+        } catch (err) {
+            console.error("Failed to fetch TURN credentials:", err);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: "Failed to fetch TURN credentials" }));
+        }
+    } else {
+        res.writeHead(404);
+        res.end();
+    }
+});
+
+const port = process.env.PORT || 3000;
+server.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+});
