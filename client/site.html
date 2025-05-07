@@ -1,16 +1,276 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebShare - Secure P2P File Sharing</title>
-  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* Reset and base styles */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #1a1a2e;
+      color: #e9e9e9;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 600px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+
+    .logo {
+      font-size: 2.2rem;
+      font-weight: bold;
+      color: #6cb2eb;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+
+    .tagline {
+      font-size: 1rem;
+      opacity: 0.8;
+    }
+
+    .card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      width: 100%;
+    }
+
+    .room-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .room-input-group {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    input, button, .file-input-label, .dropdown {
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      font-size: 1rem;
+      border: none;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+
+    input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.1);
+      color: #e9e9e9;
+    }
+
+    input::placeholder {
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    button {
+      background: #4a6fa5;
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      min-width: 120px;
+    }
+
+    button:hover {
+      background: #6cb2eb;
+      transform: translateY(-2px);
+    }
+
+    button:disabled {
+      background: #555;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .room-status {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 0.8rem 1rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .indicator-dot {
+      height: 10px;
+      width: 10px;
+      border-radius: 50%;
+      background: #ff9800;
+    }
+
+    .indicator-dot.connected {
+      background: #42b883;
+    }
+
+    .file-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .file-input-container {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .file-input {
+      position: absolute;
+      left: -9999px;
+    }
+
+    .file-input-label {
+      background: rgba(255, 255, 255, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      border: 2px dashed rgba(255, 255, 255, 0.2);
+      padding: 1.5rem;
+      text-align: center;
+    }
+
+    .file-name {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      word-break: break-all;
+      display: none;
+    }
+
+    .progress-container {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      height: 15px;
+      overflow: hidden;
+      position: relative;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: #6cb2eb;
+      width: 0;
+      transition: width 0.3s ease;
+    }
+
+    .status-message {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      color: #6cb2eb;
+      text-align: center;
+      min-height: 20px;
+    }
+
+    .settings-section {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: space-between;
+      font-size: 0.9rem;
+    }
+
+    .dropdown {
+      background: rgba(255, 255, 255, 0.1);
+      color: #e9e9e9;
+      cursor: pointer;
+    }
+
+    .theme-toggle {
+      background: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: #e9e9e9;
+      border-radius: 8px;
+      width: 40px;
+      height: 40px;
+      cursor: pointer;
+      font-size: 1.2rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .encryption-info {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      margin-top: 1rem;
+      justify-content: center;
+      opacity: 0.7;
+    }
+
+    .footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.8rem;
+      opacity: 0.7;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+
+    @media (max-width: 768px) {
+      .room-input-group {
+        flex-direction: column;
+      }
+
+      button {
+        width: 100%;
+      }
+    }
+  </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
     <div class="logo">
-      <i class="icon-share"></i>
+      ⇄
       WebShare
     </div>
     <div class="tagline">Secure peer-to-peer file sharing</div>
@@ -18,9 +278,9 @@
 
   <div class="card room-section">
     <div class="room-input-group">
-      <label for="roomInput"></label><input type="text" id="roomInput" placeholder="Enter Room ID or generate one" />
-      <button id="joinRoomBtn"><i class="icon-signin"></i> Join</button>
-      <button id="generateRoomBtn" title="Generate Random Room ID"><i class="icon-random"></i></button>
+      <input type="text" id="roomInput" placeholder="Enter Room ID or generate one" />
+      <button id="joinRoomBtn">→ Join</button>
+      <button id="generateRoomBtn" title="Generate Random Room ID">⟳</button>
     </div>
     <div class="room-status">
       <div class="status-indicator">
@@ -35,7 +295,7 @@
     <div class="file-input-container">
       <input type="file" id="fileInput" class="file-input" />
       <label for="fileInput" class="file-input-label">
-        <i class="icon-upload"></i>
+        ⬆
         <span>Choose a file or drag & drop</span>
       </label>
     </div>
@@ -43,7 +303,7 @@
     <div class="progress-container" id="progressContainer">
       <div class="progress-bar" id="progressBar"></div>
     </div>
-    <button id="sendBtn" disabled><i class="icon-send"></i> Send File</button>
+    <button id="sendBtn" disabled>⤴ Send File</button>
     <div id="status" class="status-message">Connect to a room to start sharing files</div>
     <div id="transferHistory" class="transfer-history"></div>
   </div>
@@ -56,12 +316,12 @@
       <option value="relay">Connection: Relay (TURN)</option>
     </select>
     <button id="themeToggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle dark/light theme">
-      <i class="icon-moon"></i>
+      ☾
     </button>
   </div>
 
   <div class="encryption-info">
-    <i class="icon-lock"></i>
+    🔒
     <span>End-to-end encrypted. Files never pass through our servers.</span>
   </div>
 </div>
@@ -70,7 +330,129 @@
   <p>© 2025 WebShare | <a href="#" id="aboutLink" style="color: inherit;">About</a></p>
 </div>
 
-<script src="client.js"></script>
-<script src="ui.js"></script>
+<script>
+  // Basic UI functionality
+  document.addEventListener("DOMContentLoaded", () => {
+    // File input handling
+    const fileInput = document.getElementById("fileInput");
+    const fileNameDisplay = document.getElementById("fileName");
+    const sendBtn = document.getElementById("sendBtn");
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        fileNameDisplay.textContent = `${file.name} (${formatFileSize(file.size)})`;
+        fileNameDisplay.style.display = "block";
+        sendBtn.disabled = false;
+      } else {
+        fileNameDisplay.style.display = "none";
+        sendBtn.disabled = true;
+      }
+    });
+
+    // Theme toggle
+    const themeToggle = document.getElementById("themeToggle");
+    let darkMode = true;
+
+    themeToggle.addEventListener("click", () => {
+      darkMode = !darkMode;
+      if (!darkMode) {
+        document.body.style.backgroundColor = "#f0f2f5";
+        document.body.style.color = "#333333";
+        themeToggle.innerHTML = "☀";
+
+        // Update card backgrounds
+        const cards = document.querySelectorAll(".card");
+        cards.forEach(card => {
+          card.style.backgroundColor = "#ffffff";
+        });
+      } else {
+        document.body.style.backgroundColor = "#1a1a2e";
+        document.body.style.color = "#e9e9e9";
+        themeToggle.innerHTML = "☾";
+
+        // Update card backgrounds
+        const cards = document.querySelectorAll(".card");
+        cards.forEach(card => {
+          card.style.backgroundColor = "#16213e";
+        });
+      }
+    });
+
+    // Generate random room ID
+    const generateRoomBtn = document.getElementById("generateRoomBtn");
+    const roomInput = document.getElementById("roomInput");
+
+    generateRoomBtn.addEventListener("click", () => {
+      roomInput.value = Math.random().toString(36).substring(2, 10);
+    });
+
+    // Room joining simulation
+    const joinRoomBtn = document.getElementById("joinRoomBtn");
+    const connectionDot = document.getElementById("connectionDot");
+    const roomDisplay = document.getElementById("roomDisplay");
+    const peerInfo = document.getElementById("peerInfo");
+    const status = document.getElementById("status");
+
+    joinRoomBtn.addEventListener("click", () => {
+      const roomId = roomInput.value.trim();
+      if (!roomId) {
+        status.textContent = "Please enter a room ID";
+        return;
+      }
+
+      status.textContent = "Connecting to room...";
+
+      // Simulate connection after 1 second
+      setTimeout(() => {
+        connectionDot.classList.add("connected");
+        roomDisplay.textContent = `Room: ${roomId}`;
+        peerInfo.textContent = "1 peer connected";
+        status.textContent = "Connected! You can now send files.";
+      }, 1000);
+    });
+
+    // About dialog
+    const aboutLink = document.getElementById("aboutLink");
+    aboutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      alert("WebShare is a secure peer-to-peer file sharing application that uses WebRTC technology to transfer files directly between browsers without storing them on a server. All connections are encrypted end-to-end.");
+    });
+
+    // File size formatter
+    function formatFileSize(bytes) {
+      if (bytes < 1024) return bytes + " bytes";
+      else if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+      else if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
+      else return (bytes / 1073741824).toFixed(1) + " GB";
+    }
+
+    // File sending simulation
+    sendBtn.addEventListener("click", () => {
+      if (!fileInput.files.length) return;
+
+      const progressContainer = document.getElementById("progressContainer");
+      const progressBar = document.getElementById("progressBar");
+
+      progressContainer.style.display = "block";
+      status.textContent = "Sending file...";
+
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 5;
+        progressBar.style.width = `${progress}%`;
+
+        if (progress >= 100) {
+          clearInterval(interval);
+          status.textContent = "File sent successfully!";
+          setTimeout(() => {
+            progressContainer.style.display = "none";
+            progressBar.style.width = "0";
+          }, 2000);
+        }
+      }, 100);
+    });
+  });
+</script>
 </body>
 </html>
