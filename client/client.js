@@ -17,9 +17,63 @@ document.addEventListener("DOMContentLoaded", () => {
     let retryCount = 0;
     let pendingIceCandidates = [];
     let isReconnecting = false;
+    let lastOfferTime = 0;
+    const OFFER_RETRY_DELAY = 2000; // 2s delay between offers
     const CHUNK_SIZE = 131072; // 128KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
+    const SIGNALING_TIMEOUT = 10000; // 10s timeout for signaling
+
+    async function fetchTurnCredentials() {
+        console.log("Fetching TURN credentials...");
+        try {
+            const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/get-turn-credentials", {
+                method: "GET",
+                headers: { "Content-Type": "application/json" }
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error: ${response.status}`);
+                status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
+                return [
+                    {
+                        urls: [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:3478"
+                        ]
+                    }
+                ];
+            }
+
+            const data = await response.json();
+            if (!Array.isArray(data) || !data[0]?.urls) {
+                console.error("Invalid credentials received:", data);
+                status.textContent = "Invalid credentials received. Using STUN servers.";
+                return [
+                    {
+                        urls: [
+                            "stun:stun.l.google.com:19302",
+                            "stun:stun1.l.google.com:3478"
+                        ]
+                    }
+                ];
+            }
+
+            console.log("Received ICE servers:", data);
+            return data; // Return the array of RTCIceServer objects
+        } catch (error) {
+            console.error("Failed to fetch TURN credentials:", error.message);
+            status.textContent = "Failed to fetch TURN credentials. Using STUN servers.";
+            return [
+                {
+                    urls: [
+                        "stun:stun.l.google.com:19302",
+                        "stun:stun1.l.google.com:3478"
+                    ]
+                }
+            ];
+        }
+    }
 
     function connectWebSocket() {
         if (isReconnecting) return;
@@ -38,10 +92,12 @@ document.addEventListener("DOMContentLoaded", () => {
                     ws.send(JSON.stringify({ type: "ping" }));
                     console.log("Sent ping");
                 }
-            }, 30000);
+            }, 15000); // Ping every 15s
             if (currentRoom) {
                 console.log(`Re-joining room: ${currentRoom}`);
-                ws.send(JSON.stringify({ type: "join", room: currentRoom }));
+                setTimeout(() => {
+                    ws.send(JSON.stringify({ type: "join", room: currentRoom }));
+                }, 1000); // Delay rejoin by 1s
             }
         };
 
@@ -73,9 +129,10 @@ document.addEventListener("DOMContentLoaded", () => {
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        if (!pc || pc.connectionState !== "connected") {
+                        // Only create PeerConnection if not already connected or connecting
+                        if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed") {
                             cleanupPeerConnection();
-                            createPeerConnection();
+                            await createPeerConnection();
                         }
 
                         if (!isInitiator) {
@@ -84,6 +141,14 @@ document.addEventListener("DOMContentLoaded", () => {
                                 dc = e.channel;
                                 setupDataChannel(dc);
                             };
+                            // Set a timeout to detect stalled signaling
+                            setTimeout(() => {
+                                if (pc && pc.connectionState !== "connected" && !dc) {
+                                    console.warn("Signaling stalled, restarting PeerConnection.");
+                                    cleanupPeerConnection();
+                                    createPeerConnection();
+                                }
+                            }, SIGNALING_TIMEOUT);
                         } else {
                             console.log("Creating DataChannel as initiator.");
                             dc = pc.createDataChannel("file");
@@ -92,45 +157,65 @@ document.addEventListener("DOMContentLoaded", () => {
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
                             ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            lastOfferTime = Date.now();
                         }
                         break;
 
                     case "offer":
-                        if (!pc) createPeerConnection();
-                        console.log("Received offer, setting remote description.");
-                        await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                        while (pendingIceCandidates.length > 0) {
-                            const candidate = pendingIceCandidates.shift();
-                            try {
-                                await pc.addIceCandidate(candidate);
-                                console.log("Added queued ICE candidate:", candidate);
-                            } catch (err) {
-                                console.error("Failed to add queued ICE candidate:", err);
-                            }
+                        if (!pc || pc.connectionState === "closed" || pc.connectionState === "failed") {
+                            await createPeerConnection();
                         }
-                        const answer = await pc.createAnswer();
-                        await pc.setLocalDescription(answer);
-                        ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
+                        console.log("Received offer, setting remote description.");
+                        try {
+                            if (Date.now() - lastOfferTime < OFFER_RETRY_DELAY) {
+                                console.log("Ignoring rapid offer retry");
+                                return;
+                            }
+                            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                            while (pendingIceCandidates.length > 0) {
+                                const candidate = pendingIceCandidates.shift();
+                                try {
+                                    if (candidate && candidate.candidate) {
+                                        await pc.addIceCandidate(candidate);
+                                        console.log("Added queued ICE candidate:", candidate);
+                                    }
+                                } catch (err) {
+                                    console.error("Failed to add queued ICE candidate:", err);
+                                }
+                            }
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
+                            lastOfferTime = Date.now();
+                        } catch (err) {
+                            console.error("Failed to handle offer:", err);
+                        }
                         break;
 
                     case "answer":
                         if (pc) {
                             console.log("Received answer, setting remote description.");
-                            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                            while (pendingIceCandidates.length > 0) {
-                                const candidate = pendingIceCandidates.shift();
-                                try {
-                                    await pc.addIceCandidate(candidate);
-                                    console.log("Added queued ICE candidate:", candidate);
-                                } catch (err) {
-                                    console.error("Failed to add queued ICE candidate:", err);
+                            try {
+                                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                                while (pendingIceCandidates.length > 0) {
+                                    const candidate = pendingIceCandidates.shift();
+                                    try {
+                                        if (candidate && candidate.candidate) {
+                                            await pc.addIceCandidate(candidate);
+                                            console.log("Added queued ICE candidate:", candidate);
+                                        }
+                                    } catch (err) {
+                                        console.error("Failed to add queued ICE candidate:", err);
+                                    }
                                 }
+                            } catch (err) {
+                                console.error("Failed to handle answer:", err);
                             }
                         }
                         break;
 
                     case "ice-candidate":
-                        if (pc && pc.remoteDescription) {
+                        if (pc && pc.remoteDescription && data.candidate && data.candidate.candidate) {
                             try {
                                 console.log("Adding ICE candidate:", data.candidate);
                                 await pc.addIceCandidate(data.candidate);
@@ -138,8 +223,12 @@ document.addEventListener("DOMContentLoaded", () => {
                                 console.error("Failed to add ICE candidate:", err);
                             }
                         } else {
-                            console.log("Queuing ICE candidate:", data.candidate);
-                            pendingIceCandidates.push(data.candidate);
+                            if (data.candidate && data.candidate.candidate) {
+                                console.log("Queuing ICE candidate:", data.candidate);
+                                pendingIceCandidates.push(data.candidate);
+                            } else {
+                                console.log("Ignoring empty ICE candidate");
+                            }
                         }
                         break;
 
@@ -147,11 +236,16 @@ document.addEventListener("DOMContentLoaded", () => {
                         console.log(`Room update: ${data.room}, count: ${data.count}`);
                         updatePeerInfo(data.count);
                         if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected") {
+                            if (Date.now() - lastOfferTime < OFFER_RETRY_DELAY) {
+                                console.log("Delaying ICE restart due to recent offer");
+                                return;
+                            }
                             console.log("New peer joined, restarting ICE as initiator.");
                             pc.restartIce();
                             const offer = await pc.createOffer();
                             await pc.setLocalDescription(offer);
                             ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            lastOfferTime = Date.now();
                         }
                         break;
 
@@ -173,31 +267,31 @@ document.addEventListener("DOMContentLoaded", () => {
         retryCount++;
         status.textContent = `Reconnecting... (Attempt ${retryCount}/${MAX_RETRIES})`;
         console.log(`Reconnecting attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(connectWebSocket, 5000 * retryCount); // Increased to 5s
+        setTimeout(connectWebSocket, 5000 * retryCount);
     }
 
-    function createPeerConnection() {
+    async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
+        const iceServers = await fetchTurnCredentials();
+        if (!iceServers || !Array.isArray(iceServers) || !iceServers[0]?.urls) {
+            console.error("Cannot create PeerConnection without ICE servers.");
+            status.textContent = "Failed to create peer connection.";
+            return;
+        }
+
         pc = new RTCPeerConnection({
-            iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:3478" },
-                {
-                    urls: [
-                        "turn:openrelay.metered.ca:80",
-                        "turn:openrelay.metered.ca:443",
-                        "turn:openrelay.metered.ca:443?transport=tcp"
-                    ],
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }
-            ]
+            iceServers: iceServers,
+            iceCandidatePoolSize: 10 // Increase for longer ICE gathering
         });
 
         pc.onicecandidate = ({ candidate }) => {
-            if (candidate) {
+            if (candidate && candidate.candidate) {
                 console.log("Sending ICE candidate:", candidate);
+                const candidateType = candidate.candidate.match(/typ (\w+)/)?.[1];
+                console.log("ICE candidate type:", candidateType);
                 ws.send(JSON.stringify({ type: "ice-candidate", candidate, room: currentRoom }));
+            } else {
+                console.log("Ignoring empty ICE candidate");
             }
         };
 
@@ -206,11 +300,12 @@ document.addEventListener("DOMContentLoaded", () => {
             if (pc.iceConnectionState === "failed") {
                 status.textContent = "ICE connection failed. Restarting...";
                 console.log("ICE failed, attempting restart. Check about:webrtc for details.");
-                if (isInitiator) {
+                if (isInitiator && Date.now() - lastOfferTime >= OFFER_RETRY_DELAY) {
                     pc.restartIce();
                     pc.createOffer().then(offer => {
                         pc.setLocalDescription(offer);
                         ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                        lastOfferTime = Date.now();
                     }).catch(err => console.error("Failed to restart ICE:", err));
                 }
             }
