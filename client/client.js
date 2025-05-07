@@ -25,6 +25,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const WS_TIMEOUT = 20000; // 20s for Koyeb wakeup
     let usingTurn = false;
     let turnCredentials = null;
+    let lastPeerCount = 0;
 
     async function fetchIceServers(useTurn = false) {
         if (!useTurn) {
@@ -35,11 +36,7 @@ document.addEventListener("DOMContentLoaded", () => {
             ];
         }
 
-        if (turnCredentials) {
-            console.log("Using cached TURN credentials.");
-            return turnCredentials;
-        }
-
+        turnCredentials = null; // Clear cached credentials to force refresh
         try {
             console.log("Fetching ICE servers with TURN...");
             const response = await fetch("https://primary-tove-arsenijevicdev-4f187706.koyeb.app/turn-credentials");
@@ -56,7 +53,6 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             const iceServers = await response.json();
             console.log("Fetched ICE servers:", iceServers);
-            // Prioritize TURN servers on port 443, then any TURN, then STUN
             const turnServer = iceServers.find(server => server.urls.includes("turn:") && server.urls.includes(":443")) ||
                 iceServers.find(server => server.urls.includes("turn:"));
             const stunServer = iceServers.find(server => server.urls.includes("stun:"));
@@ -122,127 +118,153 @@ document.addEventListener("DOMContentLoaded", () => {
             retryConnection();
         };
 
-        ws.onmessage = async (message) => {
-            try {
-                const data = JSON.parse(message.data);
-                console.log("Received message:", data);
+        ws.onmessage = (message) => {
+            (async () => {
+                try {
+                    const data = JSON.parse(message.data);
+                    console.log("Received message:", data);
 
-                switch (data.type) {
-                    case "pong":
-                        console.log("Received pong from server");
-                        break;
+                    switch (data.type) {
+                        case "pong":
+                            console.log("Received pong from server");
+                            break;
 
-                    case "joined":
-                        console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
-                        currentRoom = data.room;
-                        isInitiator = data.initiator;
-                        iceRestartCount = 0;
-                        usingTurn = false;
-                        updateRoomDisplay();
-                        updatePeerInfo(data.count);
+                        case "joined":
+                            console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, count: ${data.count}`);
+                            currentRoom = data.room;
+                            isInitiator = data.initiator;
+                            iceRestartCount = 0;
+                            usingTurn = false;
+                            lastPeerCount = data.count;
+                            updateRoomDisplay();
+                            updatePeerInfo(data.count);
 
-                        cleanupPeerConnection();
-                        await createPeerConnection();
-
-                        if (isInitiator) {
-                            console.log("Creating DataChannel as initiator.");
-                            dc = pc.createDataChannel("file");
-                            setupDataChannel(dc);
-                            console.log("Creating offer as initiator.");
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                        }
-                        break;
-
-                    case "offer":
-                        if (!pc) {
-                            await createPeerConnection();
-                            pc.ondatachannel = (e) => {
-                                console.log("Setting up DataChannel for non-initiator.");
-                                dc = e.channel;
-                                setupDataChannel(dc);
-                            };
-                        }
-                        if (pc) {
-                            console.log("Received offer, setting remote description.");
-                            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                            while (pendingIceCandidates.length > 0) {
-                                const candidate = pendingIceCandidates.shift();
-                                try {
-                                    await pc.addIceCandidate(candidate);
-                                    console.log("Added queued ICE candidate:", candidate);
-                                } catch (err) {
-                                    console.error("Failed to add queued ICE candidate:", err);
-                                }
-                            }
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
-                        }
-                        break;
-
-                    case "answer":
-                        if (pc) {
-                            console.log("Received answer, setting remote description.");
-                            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-                            while (pendingIceCandidates.length > 0) {
-                                const candidate = pendingIceCandidates.shift();
-                                try {
-                                    await pc.addIceCandidate(candidate);
-                                    console.log("Added queued ICE candidate:", candidate);
-                                } catch (err) {
-                                    console.error("Failed to add queued ICE candidate:", err);
-                                }
-                            }
-                        }
-                        break;
-
-                    case "ice-candidate":
-                        if (pc && pc.remoteDescription && data.candidate.candidate) {
-                            try {
-                                console.log("Adding ICE candidate:", data.candidate);
-                                await pc.addIceCandidate(data.candidate);
-                            } catch (err) {
-                                console.error("Failed to add ICE candidate:", err);
-                            }
-                        } else {
-                            console.log("Queuing ICE candidate:", data.candidate);
-                            pendingIceCandidates.push(data.candidate);
-                        }
-                        break;
-
-                    case "room-update":
-                        console.log(`Room update: ${data.room}, count: ${data.count}`);
-                        updatePeerInfo(data.count);
-                        if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
-                            console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
-                            iceRestartCount++;
-                            pc.restartIce();
-                            const offer = await pc.createOffer();
-                            await pc.setLocalDescription(offer);
-                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                        } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
-                            console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
-                            usingTurn = true;
                             cleanupPeerConnection();
                             await createPeerConnection();
+
                             if (isInitiator) {
+                                console.log("Creating DataChannel as initiator.");
+                                dc = pc.createDataChannel("file");
+                                setupDataChannel(dc);
+                                console.log("Creating offer as initiator.");
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            }
+                            break;
+
+                        case "offer":
+                            if (!pc) {
+                                await createPeerConnection();
+                                pc.ondatachannel = (e) => {
+                                    console.log("Setting up DataChannel for non-initiator.");
+                                    dc = e.channel;
+                                    setupDataChannel(dc);
+                                };
+                            }
+                            if (pc) {
+                                console.log("Received offer, setting remote description.");
+                                await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                                while (pendingIceCandidates.length > 0) {
+                                    const candidate = pendingIceCandidates.shift();
+                                    try {
+                                        await pc.addIceCandidate(candidate);
+                                        console.log("Added queued ICE candidate:", candidate);
+                                    } catch (err) {
+                                        console.error("Failed to add queued ICE candidate:", err);
+                                    }
+                                }
+                                const answer = await pc.createAnswer();
+                                await pc.setLocalDescription(answer);
+                                ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
+                            }
+                            break;
+
+                        case "answer":
+                            if (pc) {
+                                console.log("Received answer, setting remote description.");
+                                await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                                while (pendingIceCandidates.length > 0) {
+                                    const candidate = pendingIceCandidates.shift();
+                                    try {
+                                        await pc.addIceCandidate(candidate);
+                                        console.log("Added queued ICE candidate:", candidate);
+                                    } catch (err) {
+                                        console.error("Failed to add queued ICE candidate:", err);
+                                    }
+                                }
+                            }
+                            break;
+
+                        case "ice-candidate":
+                            if (pc && pc.remoteDescription && data.candidate.candidate) {
+                                try {
+                                    console.log("Adding ICE candidate:", data.candidate);
+                                    await pc.addIceCandidate(data.candidate);
+                                } catch (err) {
+                                    console.error("Failed to add ICE candidate:", err);
+                                }
+                            } else {
+                                console.log("Queuing ICE candidate:", data.candidate);
+                                pendingIceCandidates.push(data.candidate);
+                            }
+                            break;
+
+                        case "room-update":
+                            console.log(`Room update: ${data.room}, count: ${data.count}`);
+                            updatePeerInfo(data.count);
+
+                            // Detect peer disconnect and reset initiator state
+                            if (isInitiator && data.count === 1 && lastPeerCount > 1) {
+                                console.log("Peer disconnected, resetting initiator state.");
+                                cleanupPeerConnection();
+                                lastPeerCount = data.count;
+                                return;
+                            }
+
+                            // Detect new peer joining after a disconnect or initial join
+                            if (isInitiator && data.count > 1 && (lastPeerCount === 1 || lastPeerCount === 0)) {
+                                console.log("New peer joined, creating new PeerConnection.");
+                                cleanupPeerConnection();
+                                await createPeerConnection();
                                 dc = pc.createDataChannel("file");
                                 setupDataChannel(dc);
                                 const offer = await pc.createOffer();
                                 await pc.setLocalDescription(offer);
                                 ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                             }
-                        }
-                        break;
+                            // Handle ICE restarts if connection is not established
+                            else if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
+                                console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
+                                iceRestartCount++;
+                                pc.restartIce();
+                                const offer = await pc.createOffer();
+                                await pc.setLocalDescription(offer);
+                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                            } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
+                                console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
+                                usingTurn = true;
+                                cleanupPeerConnection();
+                                await createPeerConnection();
+                                if (isInitiator) {
+                                    dc = pc.createDataChannel("file");
+                                    setupDataChannel(dc);
+                                    const offer = await pc.createOffer();
+                                    await pc.setLocalDescription(offer);
+                                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                                }
+                            }
 
-                    default:
-                        console.warn("Unknown message type:", data.type);
+                            lastPeerCount = data.count;
+                            break;
+
+                        default:
+                            console.warn("Unknown message type:", data.type);
+                    }
+                } catch (err) {
+                    console.error("Error processing WebSocket message:", err);
                 }
-            } catch (err) {
-                console.error("Error processing WebSocket message:", err);
-            }
+            })();
         };
     }
 
@@ -273,30 +295,42 @@ document.addEventListener("DOMContentLoaded", () => {
         pc.oniceconnectionstatechange = () => {
             console.log("ICE connection state:", pc.iceConnectionState);
             if (pc.iceConnectionState === "failed") {
-                status.textContent = "ICE connection failed. Restarting...";
-                console.log(`ICE failed, attempting restart (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
-                if (isInitiator && iceRestartCount < MAX_ICE_RESTARTS) {
-                    iceRestartCount++;
-                    pc.restartIce();
-                    pc.createOffer().then(offer => {
-                        pc.setLocalDescription(offer);
+                (async () => {
+                    status.textContent = "ICE connection failed. Attempting recovery...";
+                    console.log(`ICE failed, attempting recovery (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
+                    if (isInitiator && iceRestartCount < MAX_ICE_RESTARTS) {
+                        iceRestartCount++;
+                        pc.restartIce();
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
                         ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                    }).catch(err => console.error("Failed to restart ICE:", err));
-                } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
-                    console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
-                    usingTurn = true;
-                    cleanupPeerConnection();
-                    createPeerConnection().then(() => {
+                    } else if (iceRestartCount >= MAX_ICE_RESTARTS && !usingTurn) {
+                        console.log("Max ICE restarts reached with STUN, switching to TURN and resetting PeerConnection.");
+                        usingTurn = true;
+                        cleanupPeerConnection();
+                        await createPeerConnection();
                         if (isInitiator) {
                             dc = pc.createDataChannel("file");
                             setupDataChannel(dc);
-                            pc.createOffer().then(offer => {
-                                pc.setLocalDescription(offer);
-                                ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
-                            }).catch(err => console.error("Failed to create offer:", err));
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                         }
-                    });
-                }
+                    } else if (usingTurn && iceRestartCount >= MAX_ICE_RESTARTS) {
+                        console.log("Max ICE restarts reached with TURN, resetting connection.");
+                        cleanupPeerConnection();
+                        await createPeerConnection();
+                        if (isInitiator) {
+                            dc = pc.createDataChannel("file");
+                            setupDataChannel(dc);
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                        }
+                    }
+                })();
+            } else if (pc.iceConnectionState === "connected") {
+                iceRestartCount = 0; // Reset on successful connection
             }
         };
 
@@ -304,10 +338,21 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log("Connection state:", pc.connectionState);
             if (pc.connectionState === "connected") {
                 status.textContent = "Peer connection established.";
-                iceRestartCount = 0; // Reset restart count on successful connection
+                iceRestartCount = 0; // Reset on successful connection
             } else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
-                status.textContent = "Peer connection lost.";
-                cleanupPeerConnection();
+                (async () => {
+                    status.textContent = "Peer connection lost.";
+                    cleanupPeerConnection();
+                    if (isInitiator && lastPeerCount > 1) {
+                        console.log("Connection lost, attempting to re-establish with new PeerConnection.");
+                        await createPeerConnection();
+                        dc = pc.createDataChannel("file");
+                        setupDataChannel(dc);
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                    }
+                })();
             }
         };
 
@@ -392,10 +437,22 @@ document.addEventListener("DOMContentLoaded", () => {
         };
 
         dc.onclose = () => {
-            console.log("DataChannel closed.");
-            sendBtn.disabled = true;
-            progressBar.style.display = "none";
-            status.textContent = "DataChannel closed.";
+            (async () => {
+                console.log("DataChannel closed.");
+                sendBtn.disabled = true;
+                progressBar.style.display = "none";
+                status.textContent = "DataChannel closed.";
+                if (isInitiator && lastPeerCount > 1) {
+                    console.log("DataChannel closed, attempting to re-establish connection.");
+                    cleanupPeerConnection();
+                    await createPeerConnection();
+                    dc = pc.createDataChannel("file");
+                    setupDataChannel(dc);
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                }
+            })();
         };
 
         dc.onerror = (e) => {
