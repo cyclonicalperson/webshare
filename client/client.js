@@ -25,6 +25,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const WS_TIMEOUT = 20000; // 20s for Koyeb wakeup
     let usingTurn = false;
     let turnCredentials = null;
+    let lastPeerCount = 0;
 
     async function fetchIceServers(useTurn = false) {
         if (!useTurn) {
@@ -56,7 +57,6 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             const iceServers = await response.json();
             console.log("Fetched ICE servers:", iceServers);
-            // Prioritize TURN servers on port 443, then any TURN, then STUN
             const turnServer = iceServers.find(server => server.urls.includes("turn:") && server.urls.includes(":443")) ||
                 iceServers.find(server => server.urls.includes("turn:"));
             const stunServer = iceServers.find(server => server.urls.includes("stun:"));
@@ -138,6 +138,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         isInitiator = data.initiator;
                         iceRestartCount = 0;
                         usingTurn = false;
+                        lastPeerCount = data.count;
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
@@ -215,7 +216,28 @@ document.addEventListener("DOMContentLoaded", () => {
                     case "room-update":
                         console.log(`Room update: ${data.room}, count: ${data.count}`);
                         updatePeerInfo(data.count);
-                        if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
+
+                        // Detect peer disconnect (count decreases to 1) and reset initiator state
+                        if (isInitiator && data.count === 1 && lastPeerCount > 1) {
+                            console.log("Peer disconnected, resetting initiator state.");
+                            cleanupPeerConnection();
+                            lastPeerCount = data.count;
+                            return;
+                        }
+
+                        // Detect new peer joining after a disconnect
+                        if (isInitiator && data.count > 1 && lastPeerCount === 1) {
+                            console.log("New peer joined after disconnect, creating new PeerConnection.");
+                            cleanupPeerConnection();
+                            await createPeerConnection();
+                            dc = pc.createDataChannel("file");
+                            setupDataChannel(dc);
+                            const offer = await pc.createOffer();
+                            await pc.setLocalDescription(offer);
+                            ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
+                        }
+                        // Handle ICE restarts if connection is not established
+                        else if (isInitiator && data.count > 1 && pc && pc.connectionState !== "connected" && iceRestartCount < MAX_ICE_RESTARTS) {
                             console.log(`Restarting ICE as initiator (attempt ${iceRestartCount + 1}/${MAX_ICE_RESTARTS}, usingTurn: ${usingTurn}).`);
                             iceRestartCount++;
                             pc.restartIce();
@@ -235,6 +257,8 @@ document.addEventListener("DOMContentLoaded", () => {
                                 ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                             }
                         }
+
+                        lastPeerCount = data.count;
                         break;
 
                     default:
