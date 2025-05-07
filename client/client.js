@@ -16,20 +16,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const MAX_RETRIES = 5;
     let retryCount = 0;
     let pendingIceCandidates = [];
-    let pendingOffers = []; // Queue for incoming offers
+    let pendingOffers = [];
     let isReconnecting = false;
     let iceRestartCount = 0;
     const MAX_ICE_RESTARTS = 1;
-    const CHUNK_SIZE = 131072; // 128KB chunks
-    const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
-    const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
-    const WS_TIMEOUT = 20000; // 20s for Koyeb wakeup
+    const CHUNK_SIZE = 131072;
+    const MAX_BUFFERED_AMOUNT = 4194304;
+    const PROGRESS_UPDATE_INTERVAL = 5;
+    const WS_TIMEOUT = 20000;
     let usingTurn = false;
     let turnCredentials = null;
     let lastPeerCount = 0;
     let peerDeviceType = "unknown";
     let localDeviceType = "desktop";
-    let isProcessingOffer = false; // Prevent multiple offer processing
+    let isProcessingOffer = false;
 
     function detectDeviceType() {
         const ua = navigator.userAgent.toLowerCase();
@@ -157,6 +157,10 @@ document.addEventListener("DOMContentLoaded", () => {
                             updateRoomDisplay();
                             updatePeerInfo(data.count);
 
+                            // Delay to allow initiator offer to arrive
+                            if (!isInitiator) {
+                                await new Promise(resolve => setTimeout(resolve, 1000));
+                            }
                             await createPeerConnection();
 
                             if (isInitiator) {
@@ -179,7 +183,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                             isProcessingOffer = true;
                             try {
-                                if (!pc) {
+                                if (!pc || pc.signalingState === "closed") {
                                     await createPeerConnection();
                                     pc.ondatachannel = (e) => {
                                         console.log("Setting up DataChannel for non-initiator.");
@@ -207,7 +211,6 @@ document.addEventListener("DOMContentLoaded", () => {
                                 ws.send(JSON.stringify({ type: "answer", answer, room: currentRoom }));
                             } finally {
                                 isProcessingOffer = false;
-                                // Process the next queued offer, if any
                                 if (pendingOffers.length > 0) {
                                     const nextOffer = pendingOffers.shift();
                                     ws.onmessage({ data: JSON.stringify({ type: "offer", offer: nextOffer, room: currentRoom }) });
@@ -216,11 +219,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             break;
 
                         case "answer":
-                            if (pc) {
-                                if (pc.signalingState !== "have-local-offer") {
-                                    console.warn("Cannot set remote answer, signaling state is:", pc.signalingState);
-                                    break;
-                                }
+                            if (pc && pc.signalingState === "have-local-offer") {
                                 console.log("Received answer, setting remote description.");
                                 await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
                                 while (pendingIceCandidates.length > 0) {
@@ -232,6 +231,8 @@ document.addEventListener("DOMContentLoaded", () => {
                                         console.error("Failed to add queued ICE candidate:", err);
                                     }
                                 }
+                            } else {
+                                console.warn("Ignoring answer, signaling state is:", pc?.signalingState || "null");
                             }
                             break;
 
@@ -279,10 +280,7 @@ document.addEventListener("DOMContentLoaded", () => {
                                         ws.send(JSON.stringify({ type: "offer", offer, room: currentRoom }));
                                     }
                                 } else {
-                                    if (pc) {
-                                        console.log("Cleaning up old PeerConnection before creating new one.");
-                                        cleanupPeerConnection();
-                                    }
+                                    if (pc) cleanupPeerConnection();
                                     await createPeerConnection();
                                     dc = pc.createDataChannel("file");
                                     setupDataChannel(dc);
@@ -352,6 +350,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function createPeerConnection() {
         console.log("Creating new PeerConnection.");
+        if (pc && pc.signalingState !== "closed") {
+            console.log("Reusing existing PeerConnection.");
+            return;
+        }
         const iceServers = await decideIceServers();
         pc = new RTCPeerConnection({ iceServers });
 
