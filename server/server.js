@@ -77,7 +77,7 @@ wss.on('connection', (ws) => {
 
             // Clean up previous room
             const prevRoom = clientRoom.get(ws);
-            if (prevRoom && rooms.has(prevRoom)) {
+            if (prevRoom && prevRoom !== roomId && rooms.has(prevRoom)) {
                 console.log(`Removing client from previous room: ${prevRoom}`);
                 rooms.get(prevRoom).delete(ws);
                 broadcastRoomInfo(prevRoom);

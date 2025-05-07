@@ -8,7 +8,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const progressBar = document.getElementById("progressBar");
     const status = document.getElementById("status");
 
-    let ws;
+    let ws = null;
     let pc = null;
     let dc = null;
     let isInitiator = false;
@@ -28,7 +28,6 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!response.ok) {
                 console.error(`HTTP error fetching ICE servers, status: ${response.status}`);
                 return [
-                    { urls: "stun:stun.relay.metered.ca:80" },
                     { urls: "stun:stun.l.google.com:19302" },
                     { urls: "stun:stun1.l.google.com:3478" }
                 ];
@@ -37,7 +36,6 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (err) {
             console.error("Failed to fetch ICE servers:", err);
             return [
-                { urls: "stun:stun.relay.metered.ca:80" },
                 { urls: "stun:stun.l.google.com:19302" },
                 { urls: "stun:stun1.l.google.com:3478" }
             ];
@@ -45,7 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function connectWebSocket() {
-        if (isReconnecting) return;
+        if (isReconnecting || ws?.readyState === WebSocket.OPEN) return;
         isReconnecting = true;
         status.textContent = "Connecting to signaling server...";
         console.log("Attempting WebSocket connection...");
@@ -64,7 +62,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }, 30000);
             if (currentRoom) {
-                console.log(`Re-joining room: ${currentRoom}`);
+                console.log(`Joining room: ${currentRoom}`);
                 ws.send(JSON.stringify({ type: "join", room: currentRoom }));
             }
         };
@@ -77,6 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
         ws.onclose = () => {
             console.warn("WebSocket closed.");
             status.textContent = "WebSocket connection closed.";
+            cleanupPeerConnection();
             retryConnection();
         };
 
@@ -97,18 +96,10 @@ document.addEventListener("DOMContentLoaded", () => {
                         updateRoomDisplay();
                         updatePeerInfo(data.count);
 
-                        if (!pc || pc.connectionState !== "connected") {
-                            cleanupPeerConnection();
-                            await createPeerConnection();
-                        }
+                        cleanupPeerConnection();
+                        await createPeerConnection();
 
-                        if (!isInitiator) {
-                            console.log("Setting up DataChannel for non-initiator.");
-                            pc.ondatachannel = (e) => {
-                                dc = e.channel;
-                                setupDataChannel(dc);
-                            };
-                        } else {
+                        if (isInitiator) {
                             console.log("Creating DataChannel as initiator.");
                             dc = pc.createDataChannel("file");
                             setupDataChannel(dc);
@@ -122,6 +113,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     case "offer":
                         if (!pc) {
                             await createPeerConnection();
+                            pc.ondatachannel = (e) => {
+                                console.log("Setting up DataChannel for non-initiator.");
+                                dc = e.channel;
+                                setupDataChannel(dc);
+                            };
                         }
                         if (pc) {
                             console.log("Received offer, setting remote description.");
@@ -158,7 +154,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         break;
 
                     case "ice-candidate":
-                        if (pc && pc.remoteDescription) {
+                        if (pc && pc.remoteDescription && data.candidate.candidate) {
                             try {
                                 console.log("Adding ICE candidate:", data.candidate);
                                 await pc.addIceCandidate(data.candidate);
@@ -220,7 +216,7 @@ document.addEventListener("DOMContentLoaded", () => {
             console.log("ICE connection state:", pc.iceConnectionState);
             if (pc.iceConnectionState === "failed") {
                 status.textContent = "ICE connection failed. Restarting...";
-                console.log("ICE failed, attempting restart. Check about:webrtc for details.");
+                console.log("ICE failed, attempting restart.");
                 if (isInitiator) {
                     pc.restartIce();
                     pc.createOffer().then(offer => {
@@ -333,12 +329,16 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
         if (ws?.readyState === WebSocket.OPEN) {
-            currentRoom = room;
+            if (currentRoom !== room) {
+                cleanupPeerConnection();
+                currentRoom = room;
+            }
             console.log(`Sending join request for room: ${room}`);
             ws.send(JSON.stringify({ type: "join", room }));
             status.textContent = `Joining room: ${room}`;
         } else {
             status.textContent = "WebSocket not connected. Reconnecting...";
+            currentRoom = room;
             connectWebSocket();
         }
     };
