@@ -156,10 +156,11 @@ server.on('request', async (req, res) => {
             const apiKey = process.env.METERED_API_KEY;
             const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
             const iceServers = await response.json();
+            console.log("Fetched TURN credentials:", iceServers);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(iceServers));
         } catch (err) {
-            console.error("Failed to fetch TURN credentials:", err);
+            console.error("Failed to fetch TURN credentials:", err.message);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: "Failed to fetch TURN credentials" }));
         }

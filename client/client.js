@@ -40,15 +40,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Get appropriate ICE servers based on connection needs
     async function getIceServers(useTurn = false) {
-        // Basic STUN servers (always include these)
+        // Basic STUN server
         const stunServers = [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" }
+            { urls: "stun:stun.l.google.com:19302" }
         ];
 
-        // Use STUN for desktop - desktop connections
         if (!useTurn) {
-            console.log("Using STUN-only configuration");
+            console.log("Using STUN-only configuration:", stunServers);
             return stunServers;
         }
 
@@ -58,23 +56,41 @@ document.addEventListener("DOMContentLoaded", () => {
 
             if (!response.ok) {
                 console.warn("Failed to fetch TURN servers, falling back to backup");
-                return [...stunServers, {
-                    urls: "turn:openrelay.metered.ca:443",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }];
+                const backupServers = [
+                    ...stunServers,
+                    {
+                        urls: "turn:openrelay.metered.ca:443",
+                        username: "openrelayproject",
+                        credential: "openrelayproject"
+                    }
+                ];
+                console.log("Backup ICE servers:", backupServers);
+                return backupServers;
             }
 
             const iceServers = await response.json();
-            console.log("Using server-provided ICE configuration");
-            return iceServers;
+            // Streamline ICE servers: keep STUN and up to two TURN (UDP and TCP/TLS)
+            const streamlinedServers = [
+                ...stunServers,
+                ...iceServers.filter(server =>
+                    server.urls.includes("turn:standard.relay.metered.ca:443") ||
+                    server.urls.includes("turns:standard.relay.metered.ca:443")
+                ).slice(0, 2) // Limit to two TURN servers
+            ];
+            console.log("Streamlined ICE servers:", streamlinedServers);
+            return streamlinedServers.length > 1 ? streamlinedServers : [...stunServers, ...iceServers];
         } catch (err) {
             console.error("Error fetching TURN credentials:", err);
-            return [...stunServers, {
-                urls: "turn:openrelay.metered.ca:443",
-                username: "openrelayproject",
-                credential: "openrelayproject"
-            }];
+            const backupServers = [
+                ...stunServers,
+                {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
+            ];
+            console.log("Error fallback ICE servers:", backupServers);
+            return backupServers;
         }
     }
 
@@ -245,26 +261,27 @@ document.addEventListener("DOMContentLoaded", () => {
             // Create the peer connection
             pc = new RTCPeerConnection({ iceServers });
 
-            // Set up timeout for STUN connection
+            // Set up timeout for connection
             const connectionTimeout = setTimeout(() => {
-                if (pc.connectionState !== "connected" && !useTurn && isInitiator) {
-                    console.log("STUN connection timed out, retrying with TURN");
+                if (pc.connectionState !== "connected") {
+                    console.log(`Connection timed out (TURN: ${useTurn}), closing connection`);
                     cleanupPeerConnection();
-                    setupPeerConnection(true);
-                    createDataChannel();
-                    createAndSendOffer();
+                    status.textContent = "Failed to connect to peer. Please try again.";
+                    isConnectingPeer = false;
                 }
-            }, 10000); // 10-second timeout
+            }, 15000); // 15-second timeout for STUN or TURN
 
             // Set up event handlers
             pc.onicecandidate = ({ candidate }) => {
                 if (candidate && ws && ws.readyState === WebSocket.OPEN) {
-                    console.log("Sending ICE candidate");
+                    console.log("Sending ICE candidate:", candidate.candidate);
                     ws.send(JSON.stringify({
                         type: "ice-candidate",
                         candidate,
                         room: currentRoom
                     }));
+                } else {
+                    console.log("ICE candidate ignored:", candidate ? candidate.candidate : "null");
                 }
             };
 
@@ -273,29 +290,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 if (pc.connectionState === "connected") {
                     isConnectingPeer = false;
-                    clearTimeout(connectionTimeout); // Clear timeout on success
+                    clearTimeout(connectionTimeout);
                     status.textContent = "Peer connection established!";
-                } else if (pc.connectionState === "failed") {
-                    // If STUN failed, try with TURN
-                    if (!useTurn && isInitiator) {
-                        console.log("Connection failed, retrying with TURN");
-                        cleanupPeerConnection();
-                        setupPeerConnection(true);
-                        createDataChannel();
-                        createAndSendOffer();
-                    }
+                } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+                    console.log(`Connection failed (TURN: ${useTurn})`);
+                    clearTimeout(connectionTimeout);
+                    cleanupPeerConnection();
+                    status.textContent = "Peer connection failed. Please try again.";
+                    isConnectingPeer = false;
                 }
             };
 
             pc.oniceconnectionstatechange = () => {
                 console.log("ICE state:", pc.iceConnectionState);
-
-                if (pc.iceConnectionState === "failed" && !useTurn && isInitiator) {
-                    console.log("ICE connection failed, retrying with TURN");
+                if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "disconnected") {
+                    console.log(`ICE connection failed (TURN: ${useTurn})`);
+                    clearTimeout(connectionTimeout);
                     cleanupPeerConnection();
-                    setupPeerConnection(true);
-                    createDataChannel();
-                    createAndSendOffer();
+                    status.textContent = "ICE connection failed. Please try again.";
+                    isConnectingPeer = false;
                 }
             };
 
