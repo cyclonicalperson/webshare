@@ -32,8 +32,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // Detect user's device type
     function detectDeviceType() {
         const ua = navigator.userAgent.toLowerCase();
-        const isMobile = /mobile|android|iphone|ipad|ipod|blackberry|windows phone/.test(ua);
-        return isMobile ? "mobile" : "desktop";
+        const isMobileUA = /mobile|android|iphone|ipad|ipod|blackberry|windows phone|tablet|kindle|silk|playbook/.test(ua);
+        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        const isSmallScreen = window.screen.width <= 768 || window.screen.height <= 768;
+        return (isMobileUA || isTouchDevice || isSmallScreen) ? "mobile" : "desktop";
     }
 
     // Get appropriate ICE servers based on connection needs
@@ -214,7 +216,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
 
                 console.log("New peer detected, sending offer");
-                const needTurn = deviceType === "mobile" || (data.devices ? data.devices.includes("mobile") : false);
+                const needTurn = deviceType === "mobile" || (data.peerTypes ? data.peerTypes.includes("mobile") : false);
                 await setupPeerConnection(needTurn);
                 createDataChannel();
                 await createAndSendOffer();
@@ -243,6 +245,17 @@ document.addEventListener("DOMContentLoaded", () => {
             // Create the peer connection
             pc = new RTCPeerConnection({ iceServers });
 
+            // Set up timeout for STUN connection
+            const connectionTimeout = setTimeout(() => {
+                if (pc.connectionState !== "connected" && !useTurn && isInitiator) {
+                    console.log("STUN connection timed out, retrying with TURN");
+                    cleanupPeerConnection();
+                    setupPeerConnection(true);
+                    createDataChannel();
+                    createAndSendOffer();
+                }
+            }, 10000); // 10-second timeout
+
             // Set up event handlers
             pc.onicecandidate = ({ candidate }) => {
                 if (candidate && ws && ws.readyState === WebSocket.OPEN) {
@@ -260,6 +273,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 if (pc.connectionState === "connected") {
                     isConnectingPeer = false;
+                    clearTimeout(connectionTimeout); // Clear timeout on success
                     status.textContent = "Peer connection established!";
                 } else if (pc.connectionState === "failed") {
                     // If STUN failed, try with TURN

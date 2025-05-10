@@ -21,12 +21,15 @@ function broadcastRoomInfo(roomId) {
         console.log(`No clients in room ${roomId}`);
         return;
     }
+    // Collect peerTypes from all clients in the room
+    const peerTypes = Array.from(clients).map(client => clientRoom.get(client)?.deviceType || 'unknown');
     const message = JSON.stringify({
         type: 'room-update',
         room: roomId,
         count: clients.size,
+        peerTypes
     });
-    console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}`);
+    console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}, peerTypes: ${peerTypes}`);
     for (const client of clients) {
         /** @type {import('ws').WebSocket} */
         if (client.readyState === WebSocket.OPEN) {
@@ -78,8 +81,12 @@ wss.on('connection', (ws) => {
                 return;
             }
 
+            // Store deviceType from the join message
+            const deviceType = msg.deviceType || 'unknown';
+            clientRoom.set(ws, { roomId, deviceType });
+
             // Clean up previous room
-            const prevRoom = clientRoom.get(ws);
+            const prevRoom = clientRoom.get(ws)?.roomId;
             if (prevRoom && rooms.has(prevRoom)) {
                 console.log(`Removing client from previous room: ${prevRoom}`);
                 rooms.get(prevRoom).delete(ws);
@@ -96,19 +103,21 @@ wss.on('connection', (ws) => {
                 console.log(`Created new room: ${roomId}`);
             }
             rooms.get(roomId).add(ws);
-            clientRoom.set(ws, roomId);
             console.log(`Client joined room: ${roomId}`);
 
             const clients = rooms.get(roomId);
             const initiator = clients.size === 1;
+            // Collect peerTypes for the room
+            const peerTypes = Array.from(clients).map(client => clientRoom.get(client)?.deviceType || 'unknown');
 
             ws.send(JSON.stringify({
                 type: 'joined',
                 room: roomId,
                 count: clients.size,
-                initiator
+                initiator,
+                peerTypes
             }));
-            console.log(`Sent joined message to client: ${roomId}, count: ${clients.size}, initiator: ${initiator}`);
+            console.log(`Sent joined message to client: ${roomId}, count: ${clients.size}, initiator: ${initiator}, peerTypes: ${peerTypes}`);
 
             broadcastRoomInfo(roomId);
             return;
