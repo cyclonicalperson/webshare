@@ -18,6 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const MAX_RECONNECT_ATTEMPTS = 5;
     const WS_TIMEOUT = 20000; // 20s timeout for Koyeb server wakeup
     const MAX_CONNECTION_RETRIES = 3; // Limit peer connection retries
+    const TURN_FETCH_RETRIES = 2; // Retry /turn-credentials fetch
 
     // State variables
     let ws = null;
@@ -35,7 +36,7 @@ document.addEventListener("DOMContentLoaded", () => {
     function detectDeviceType() {
         const ua = navigator.userAgent.toLowerCase();
         const isMobileUA = /mobile|android|iphone|ipad|ipod|blackberry|windows phone|tablet|kindle|silk|playbook/.test(ua);
-        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0 || navigator.msMaxTouchPoints > 0;
+        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
         const isSmallScreen = window.screen.width <= 768 || window.screen.height <= 768;
         return (isMobileUA || isTouchDevice || isSmallScreen) ? "mobile" : "desktop";
     }
@@ -47,61 +48,56 @@ document.addEventListener("DOMContentLoaded", () => {
         ];
 
         if (!useTurn) {
-            console.log("Using STUN-only configuration:", stunServers);
+            console.log("Using STUN-only configuration:", JSON.stringify(stunServers, null, 2));
             return stunServers;
         }
 
-        try {
-            console.log("Fetching TURN servers...");
-            const response = await fetch(`${SERVER_URL.replace("wss:", "https:")}/turn-credentials`);
+        // Hardcode Metered TCP/TLS TURN as primary for mobile NAT traversal
+        const hardcodedTurn = [
+            ...stunServers,
+            {
+                urls: "turns:standard.relay.metered.ca:443?transport=tcp",
+                username: "846538aa24ea50d97dd15a71",
+                credential: "reAP96J/diZKhFyL"
+            }
+        ];
 
-            if (!response.ok) {
-                console.warn("Failed to fetch TURN servers, falling back to backup");
-                const backupServers = [
+        let attempt = 0;
+        while (attempt <= TURN_FETCH_RETRIES) {
+            try {
+                console.log(`Fetching TURN servers (attempt ${attempt + 1}/${TURN_FETCH_RETRIES + 1})...`);
+                const response = await fetch(`${SERVER_URL.replace("wss:", "https:")}/turn-credentials`);
+
+                if (!response.ok) {
+                    console.warn(`TURN fetch failed: ${response.status} ${response.statusText}`);
+                }
+
+                const iceServers = await response.json();
+                console.log("TURN credentials response:", JSON.stringify(iceServers, null, 2));
+                const hasExpectedServers = iceServers.some(server => server.urls.includes("standard.relay.metered.ca"));
+                if (!hasExpectedServers) {
+                    console.warn("No expected Metered servers in response, using hardcoded TURN");
+                    return hardcodedTurn;
+                }
+
+                // Use only STUN and TCP/TLS TURN to optimize for mobile NAT
+                const streamlinedServers = [
                     ...stunServers,
-                    {
-                        urls: "turn:openrelay.metered.ca:443",
-                        username: "openrelayproject",
-                        credential: "openrelayproject"
-                    }
+                    ...iceServers.filter(server => server.urls.includes("turns:standard.relay.metered.ca:443")).slice(0, 1)
                 ];
-                console.log("Backup ICE servers:", backupServers);
-                return backupServers;
-            }
-
-            const iceServers = await response.json();
-            const hasExpectedServers = iceServers.some(server => server.urls.includes("standard.relay.metered.ca"));
-            if (hasExpectedServers) {
-                console.log("Using full server-provided ICE servers:", JSON.stringify(iceServers, null, 2));
-                return iceServers;
-            }
-            const streamlinedServers = [
-                ...stunServers,
-                ...iceServers.filter(server =>
-                    server.urls.includes("turn:standard.relay.metered.ca:443") ||
-                    server.urls.includes("turns:standard.relay.metered.ca:443")
-                ).slice(0, 2),
-                {
-                    urls: "turn:openrelay.metered.ca:443",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
+                console.log("Streamlined ICE servers:", JSON.stringify(streamlinedServers, null, 2));
+                return streamlinedServers.length > 1 ? streamlinedServers : hardcodedTurn;
+            } catch (err) {
+                console.error(`Error fetching TURN credentials (attempt ${attempt + 1}):`, err.message);
+                attempt++;
+                if (attempt > TURN_FETCH_RETRIES) {
+                    console.warn("Max TURN fetch retries reached, using hardcoded TURN");
+                    return hardcodedTurn;
                 }
-            ];
-            console.log("Streamlined ICE servers:", JSON.stringify(streamlinedServers, null, 2));
-            return streamlinedServers;
-        } catch (err) {
-            console.error("Error fetching TURN credentials:", err.message);
-            const backupServers = [
-                ...stunServers,
-                {
-                    urls: "turn:openrelay.metered.ca:443",
-                    username: "openrelayproject",
-                    credential: "openrelayproject"
-                }
-            ];
-            console.log("Error fallback ICE servers:", backupServers);
-            return backupServers;
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1s before retry
+            }
         }
+        return hardcodedTurn; // Fallback if all retries fail
     }
 
     // Connect to the signaling server
@@ -286,7 +282,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     isConnectingPeer = false;
                     connectionRetries++;
                 }
-            }, 20000);
+            }, 30000); // 30-second timeout for mobile NAT
 
             // Set up event handlers
             pc.onicecandidate = ({ candidate }) => {

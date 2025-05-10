@@ -161,7 +161,13 @@ server.on('request', async (req, res) => {
         setCORSHeaders(res);
         try {
             const apiKey = process.env.METERED_API_KEY;
+            if (!apiKey) {
+                console.error("METERED_API_KEY not set");
+            }
             const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
+            if (!response.ok) {
+                console.error(`TURN fetch failed: ${response.status} ${response.statusText}`);
+            }
             const iceServers = await response.json();
             console.log("Fetched TURN credentials:", JSON.stringify(iceServers, null, 2));
             const hasTurn = iceServers.some(server => server.urls.includes("turn:") || server.urls.includes("turns:"));
