@@ -14,33 +14,34 @@ document.addEventListener("DOMContentLoaded", () => {
     const CHUNK_SIZE = 262144; // 256KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 1; // Update progress every 1%
-    const RECONNECT_TIMEOUT = 5000; // 5 seconds
+    const RECONNECT_TIMEOUT = 10000; // 10 seconds
     const MAX_RECONNECT_ATTEMPTS = 5;
     const WS_TIMEOUT = 20000; // 20s timeout for Koyeb server wakeup
+    const MAX_CONNECTION_RETRIES = 3; // Limit peer connection retries
 
     // State variables
-    let ws = null; // WebSocket
-    let pc = null; // PeerConnection
-    let dc = null; // DataChannel
-    let isInitiator = false; // Track whether the client is sending or receiving a connection
-    let currentRoom = ""; // Current ws room
+    let ws = null;
+    let pc = null;
+    let dc = null;
+    let isInitiator = false;
+    let currentRoom = "";
     let reconnectAttempts = 0;
     let pendingIceCandidates = [];
-    let deviceType = detectDeviceType(); // PC/Mobile
+    let deviceType = detectDeviceType();
     let isConnectingPeer = false;
+    let connectionRetries = 0;
 
     // Detect user's device type
     function detectDeviceType() {
         const ua = navigator.userAgent.toLowerCase();
         const isMobileUA = /mobile|android|iphone|ipad|ipod|blackberry|windows phone|tablet|kindle|silk|playbook/.test(ua);
-        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0 || navigator.msMaxTouchPoints > 0;
         const isSmallScreen = window.screen.width <= 768 || window.screen.height <= 768;
         return (isMobileUA || isTouchDevice || isSmallScreen) ? "mobile" : "desktop";
     }
 
     // Get appropriate ICE servers based on connection needs
     async function getIceServers(useTurn = false) {
-        // Basic STUN server
         const stunServers = [
             { urls: "stun:stun.l.google.com:19302" }
         ];
@@ -69,18 +70,27 @@ document.addEventListener("DOMContentLoaded", () => {
             }
 
             const iceServers = await response.json();
-            // Streamline ICE servers: keep STUN and up to two TURN (UDP and TCP/TLS)
+            const hasExpectedServers = iceServers.some(server => server.urls.includes("standard.relay.metered.ca"));
+            if (hasExpectedServers) {
+                console.log("Using full server-provided ICE servers:", JSON.stringify(iceServers, null, 2));
+                return iceServers;
+            }
             const streamlinedServers = [
                 ...stunServers,
                 ...iceServers.filter(server =>
                     server.urls.includes("turn:standard.relay.metered.ca:443") ||
                     server.urls.includes("turns:standard.relay.metered.ca:443")
-                ).slice(0, 2) // Limit to two TURN servers
+                ).slice(0, 2),
+                {
+                    urls: "turn:openrelay.metered.ca:443",
+                    username: "openrelayproject",
+                    credential: "openrelayproject"
+                }
             ];
-            console.log("Streamlined ICE servers:", streamlinedServers);
-            return streamlinedServers.length > 1 ? streamlinedServers : [...stunServers, ...iceServers];
+            console.log("Streamlined ICE servers:", JSON.stringify(streamlinedServers, null, 2));
+            return streamlinedServers;
         } catch (err) {
-            console.error("Error fetching TURN credentials:", err);
+            console.error("Error fetching TURN credentials:", err.message);
             const backupServers = [
                 ...stunServers,
                 {
@@ -109,14 +119,12 @@ document.addEventListener("DOMContentLoaded", () => {
             status.textContent = "Connected to signaling server.";
             console.log("WebSocket connection established");
 
-            // Setup keepalive ping
             setInterval(() => {
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: "ping" }));
                 }
             }, 30000);
 
-            // Join room if we have one
             if (currentRoom) {
                 joinRoom(currentRoom);
             }
@@ -131,7 +139,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         ws.onerror = (err) => {
             console.error("WebSocket error:", err);
-            status.textContent = "WebSocket error occurred.";
+            status.textContent = "WebSocket error occurred. Retrying...";
         };
 
         ws.onmessage = async (event) => {
@@ -143,11 +151,13 @@ document.addEventListener("DOMContentLoaded", () => {
     function attemptReconnect() {
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
             status.textContent = "Failed to reconnect after multiple attempts.";
+            console.log("Max reconnect attempts reached");
             return;
         }
 
         reconnectAttempts++;
         status.textContent = `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+        console.log(`Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
 
         setTimeout(connectWebSocket, RECONNECT_TIMEOUT);
     }
@@ -156,7 +166,7 @@ document.addEventListener("DOMContentLoaded", () => {
     async function handleWebSocketMessage(event) {
         try {
             const data = JSON.parse(event.data);
-            console.log("Received:", data.type);
+            console.log("Received:", data.type, data);
 
             switch (data.type) {
                 case "pong":
@@ -187,7 +197,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     console.log("Unknown message type:", data.type);
             }
         } catch (err) {
-            console.error("Error processing message:", err);
+            console.error("Error processing message:", err.message);
             status.textContent = "Error processing server message.";
         }
     }
@@ -214,7 +224,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             }
         } catch (err) {
-            console.error("Error handling room joined:", err);
+            console.error("Error handling room joined:", err.message);
             status.textContent = "Error joining room.";
         }
     }
@@ -230,6 +240,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     console.log("Already connecting to peer, ignoring room update");
                     return;
                 }
+                if (connectionRetries >= MAX_CONNECTION_RETRIES) {
+                    console.log("Max connection retries reached, stopping attempts");
+                    status.textContent = "Unable to connect to peer after multiple attempts.";
+                    return;
+                }
 
                 console.log("New peer detected, sending offer");
                 const needTurn = deviceType === "mobile" || (data.peerTypes ? data.peerTypes.includes("mobile") : false);
@@ -242,9 +257,10 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.count <= 1 && pc) {
                 console.log("All peers left, cleaning up connection");
                 cleanupPeerConnection();
+                connectionRetries = 0;
             }
         } catch (err) {
-            console.error("Error handling room update:", err);
+            console.error("Error handling room update:", err.message);
             status.textContent = "Error updating room state.";
         }
     }
@@ -268,8 +284,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     cleanupPeerConnection();
                     status.textContent = "Failed to connect to peer. Please try again.";
                     isConnectingPeer = false;
+                    connectionRetries++;
                 }
-            }, 15000); // 15-second timeout for STUN or TURN
+            }, 20000);
 
             // Set up event handlers
             pc.onicecandidate = ({ candidate }) => {
@@ -290,6 +307,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 if (pc.connectionState === "connected") {
                     isConnectingPeer = false;
+                    connectionRetries = 0;
                     clearTimeout(connectionTimeout);
                     status.textContent = "Peer connection established!";
                 } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
@@ -298,6 +316,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     cleanupPeerConnection();
                     status.textContent = "Peer connection failed. Please try again.";
                     isConnectingPeer = false;
+                    connectionRetries++;
                 }
             };
 
@@ -309,6 +328,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     cleanupPeerConnection();
                     status.textContent = "ICE connection failed. Please try again.";
                     isConnectingPeer = false;
+                    connectionRetries++;
                 }
             };
 
@@ -320,9 +340,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 };
             }
         } catch (err) {
-            console.error("Error setting up peer connection:", err);
+            console.error("Error setting up peer connection:", err.message);
             isConnectingPeer = false;
             status.textContent = "Failed to create peer connection.";
+            connectionRetries++;
             throw err;
         }
     }
@@ -341,8 +362,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 offer: pc.localDescription,
                 room: currentRoom
             }));
+            console.log("Sent offer:", pc.localDescription);
         } catch (err) {
-            console.error("Error creating offer:", err);
+            console.error("Error creating offer:", err.message);
+            status.textContent = "Error creating offer.";
             throw err;
         }
     }
@@ -355,7 +378,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         try {
-            console.log("Processing remote offer");
+            console.log("Processing remote offer:", offer);
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
             // Process any queued ICE candidates
@@ -373,8 +396,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 answer: pc.localDescription,
                 room: currentRoom
             }));
+            console.log("Sent answer:", pc.localDescription);
         } catch (err) {
-            console.error("Error handling offer:", err);
+            console.error("Error handling offer:", err.message);
+            status.textContent = "Error processing offer.";
             throw err;
         }
     }
@@ -387,7 +412,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         try {
-            console.log("Setting remote description from answer");
+            console.log("Processing remote answer:", answer);
             await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
             // Process any queued ICE candidates
@@ -396,7 +421,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 await pc.addIceCandidate(candidate);
             }
         } catch (err) {
-            console.error("Error handling answer:", err);
+            console.error("Error handling answer:", err.message);
+            status.textContent = "Error processing answer.";
             throw err;
         }
     }
@@ -406,6 +432,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!pc || !candidate || !candidate.candidate) return;
 
         try {
+            console.log("Received ICE candidate:", candidate.candidate);
             if (pc.remoteDescription) {
                 await pc.addIceCandidate(candidate);
             } else {
@@ -413,7 +440,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 pendingIceCandidates.push(candidate);
             }
         } catch (err) {
-            console.error("Error adding ICE candidate:", err);
+            console.error("Error adding ICE candidate:", err.message);
+            status.textContent = "Error adding ICE candidate.";
             throw err;
         }
     }
@@ -427,7 +455,7 @@ document.addEventListener("DOMContentLoaded", () => {
             dc = pc.createDataChannel("file-transfer");
             setupDataChannel(dc);
         } catch (err) {
-            console.error("Error creating data channel:", err);
+            console.error("Error creating data channel:", err.message);
             status.textContent = "Error creating data channel.";
         }
     }
@@ -475,7 +503,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     progressBar.value = 0;
                     status.textContent = `Receiving: ${fileMetadata.name}`;
                 } catch (err) {
-                    console.error("Error parsing file metadata:", err);
+                    console.error("Error parsing file metadata:", err.message);
                     status.textContent = "Error parsing file metadata.";
                 }
                 return;
@@ -589,7 +617,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 progressBar.style.display = "none";
             }, 2000);
         } catch (err) {
-            console.error("Error sending file:", err);
+            console.error("Error sending file:", err.message);
             status.textContent = "Error sending file.";
             progressBar.style.display = "none";
             throw err;
@@ -637,7 +665,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             await sendFile(file);
         } catch (err) {
-            console.error("Error in sendFile:", err);
+            console.error("Error in sendFile:", err.message);
         }
     });
 

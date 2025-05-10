@@ -31,7 +31,6 @@ function broadcastRoomInfo(roomId) {
     });
     console.log(`Broadcasting room update: ${roomId}, count: ${clients.size}, peerTypes: ${peerTypes}`);
     for (const client of clients) {
-        /** @type {import('ws').WebSocket} */
         if (client.readyState === WebSocket.OPEN) {
             client.send(message);
         } else {
@@ -41,7 +40,8 @@ function broadcastRoomInfo(roomId) {
 }
 
 function forwardToRoom(sender, messageObj) {
-    const roomId = clientRoom.get(sender);
+    const roomData = clientRoom.get(sender);
+    const roomId = roomData?.roomId;
     if (!roomId) {
         console.log("No room found for sender");
         return;
@@ -52,16 +52,18 @@ function forwardToRoom(sender, messageObj) {
         return;
     }
     const msg = JSON.stringify(messageObj);
-    console.log(`Forwarding ${messageObj.type} to room ${roomId}`);
+    console.log(`Forwarding ${messageObj.type} to room ${roomId}:`, msg);
+    let forwardedCount = 0;
     for (const client of clients) {
         if (client !== sender && client.readyState === WebSocket.OPEN) {
             client.send(msg);
+            forwardedCount++;
         }
     }
+    console.log(`Forwarded ${messageObj.type} to ${forwardedCount} clients in room ${roomId}`);
 }
 
 wss.on('connection', (ws) => {
-    /** @type {import('ws').WebSocket} */
     console.log("New WebSocket connection established");
 
     ws.on('message', (data) => {
@@ -70,7 +72,12 @@ wss.on('connection', (ws) => {
             msg = JSON.parse(data);
             console.log("Received message:", msg);
         } catch (err) {
-            console.error("Failed to parse message:", err);
+            console.error("Failed to parse message:", err.message);
+            return;
+        }
+
+        if (msg.type === 'ping') {
+            ws.send(JSON.stringify({ type: 'pong' }));
             return;
         }
 
@@ -80,7 +87,6 @@ wss.on('connection', (ws) => {
                 console.log("No room ID provided");
                 return;
             }
-
             // Store deviceType from the join message
             const deviceType = msg.deviceType || 'unknown';
             clientRoom.set(ws, { roomId, deviceType });
@@ -129,7 +135,8 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        const roomId = clientRoom.get(ws);
+        const roomData = clientRoom.get(ws);
+        const roomId = roomData?.roomId;
         if (roomId && rooms.has(roomId)) {
             console.log(`Client disconnected from room: ${roomId}`);
             rooms.get(roomId).delete(ws);
@@ -144,7 +151,7 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('error', (err) => {
-        console.error("WebSocket error:", err);
+        console.error("WebSocket error:", err.message);
     });
 });
 
@@ -156,7 +163,11 @@ server.on('request', async (req, res) => {
             const apiKey = process.env.METERED_API_KEY;
             const response = await fetch(`https://webshare.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`);
             const iceServers = await response.json();
-            console.log("Fetched TURN credentials:", iceServers);
+            console.log("Fetched TURN credentials:", JSON.stringify(iceServers, null, 2));
+            const hasTurn = iceServers.some(server => server.urls.includes("turn:") || server.urls.includes("turns:"));
+            if (!hasTurn) {
+                console.warn("No TURN servers in response, may cause connection issues");
+            }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(iceServers));
         } catch (err) {
