@@ -11,21 +11,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Constants
     const SERVER_URL = "wss://primary-tove-arsenijevicdev-4f187706.koyeb.app";
-    const CHUNK_SIZE = 131072; // 128KB chunks
-    const MAX_BUFFERED_AMOUNT = 2097152; // 2MB buffer threshold
-    const PROGRESS_UPDATE_INTERVAL = 5; // Update progress every 5%
+    const CHUNK_SIZE = 262144; // 256KB chunks
+    const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
+    const PROGRESS_UPDATE_INTERVAL = 1; // Update progress every 1%
     const RECONNECT_TIMEOUT = 5000; // 5 seconds
     const MAX_RECONNECT_ATTEMPTS = 5;
+    const WS_TIMEOUT = 20000; // 20s timeout for Koyeb server wakeup
 
     // State variables
-    let ws = null;
-    let pc = null;
-    let dc = null;
-    let isInitiator = false;
-    let currentRoom = "";
+    let ws = null; // WebSocket
+    let pc = null; // PeerConnection
+    let dc = null; // DataChannel
+    let isInitiator = false; // Track whether the client is sending or receiving a connection
+    let currentRoom = ""; // Current ws room
     let reconnectAttempts = 0;
     let pendingIceCandidates = [];
-    let deviceType = detectDeviceType();
+    let deviceType = detectDeviceType(); // PC/Mobile
     let isConnectingPeer = false;
 
     // Detect user's device type
@@ -43,6 +44,7 @@ document.addEventListener("DOMContentLoaded", () => {
             { urls: "stun:stun1.l.google.com:19302" }
         ];
 
+        // Use STUN for desktop - desktop connections
         if (!useTurn) {
             console.log("Using STUN-only configuration");
             return stunServers;
@@ -82,6 +84,7 @@ document.addEventListener("DOMContentLoaded", () => {
         console.log("Connecting to WebSocket server...");
 
         ws = new WebSocket(SERVER_URL);
+        ws.timeout = WS_TIMEOUT;
 
         ws.onopen = () => {
             reconnectAttempts = 0;
@@ -113,7 +116,9 @@ document.addEventListener("DOMContentLoaded", () => {
             status.textContent = "WebSocket error occurred.";
         };
 
-        ws.onmessage = handleWebSocketMessage;
+        ws.onmessage = async (event) => {
+            await handleWebSocketMessage(event);
+        };
     }
 
     // Handle reconnection attempts
@@ -130,7 +135,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // Process messages from the signaling server
-    function handleWebSocketMessage(event) {
+    async function handleWebSocketMessage(event) {
         try {
             const data = JSON.parse(event.data);
             console.log("Received:", data.type);
@@ -141,23 +146,23 @@ document.addEventListener("DOMContentLoaded", () => {
                     break;
 
                 case "joined":
-                    handleRoomJoined(data);
+                    await handleRoomJoined(data);
                     break;
 
                 case "offer":
-                    handleRemoteOffer(data.offer);
+                    await handleRemoteOffer(data.offer);
                     break;
 
                 case "answer":
-                    handleRemoteAnswer(data.answer);
+                    await handleRemoteAnswer(data.answer);
                     break;
 
                 case "ice-candidate":
-                    handleRemoteIceCandidate(data.candidate);
+                    await handleRemoteIceCandidate(data.candidate);
                     break;
 
                 case "room-update":
-                    handleRoomUpdate(data);
+                    await handleRoomUpdate(data);
                     break;
 
                 default:
@@ -165,64 +170,69 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             console.error("Error processing message:", err);
+            status.textContent = "Error processing server message.";
         }
     }
 
     // Handle joining a room successfully
     async function handleRoomJoined(data) {
-        console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, peers: ${data.count}`);
-        currentRoom = data.room;
-        isInitiator = data.initiator;
+        try {
+            console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, peers: ${data.count}`);
+            currentRoom = data.room;
+            isInitiator = data.initiator;
 
-        roomDisplay.textContent = `Room: ${currentRoom}`;
-        peerInfo.textContent = `Peers: ${data.count}`;
+            roomDisplay.textContent = `Room: ${currentRoom}`;
+            peerInfo.textContent = `Peers: ${data.count}`;
 
-        // Start the WebRTC connection if we're the initiator or if there are other peers
-        if (isInitiator || data.count > 1) {
-            // By default, start with STUN for desktop-desktop connections
-            // Use TURN for connections involving mobile devices
-            const needTurn = deviceType === "mobile" || data.peerTypes?.includes("mobile");
-            await setupPeerConnection(needTurn);
+            // Start the WebRTC connection if there are other peers
+            if (data.count > 1) {
+                // Use TURN for connections involving mobile devices
+                const needTurn = deviceType === "mobile" || (data.peerTypes ? data.peerTypes.includes("mobile") : false);
+                await setupPeerConnection(needTurn);
 
-            if (isInitiator) {
-                createDataChannel();
-                createAndSendOffer();
+                if (isInitiator) {
+                    createDataChannel();
+                    await createAndSendOffer();
+                }
             }
+        } catch (err) {
+            console.error("Error handling room joined:", err);
+            status.textContent = "Error joining room.";
         }
     }
 
     // Handle updates about the room state
     async function handleRoomUpdate(data) {
-        peerInfo.textContent = `Peers: ${data.count}`;
+        try {
+            peerInfo.textContent = `Peers: ${data.count}`;
 
-        // If we're the initiator and a peer just joined, send them an offer
-        if (isInitiator && data.count > 1 && (!pc || pc.connectionState !== "connected")) {
-            if (isConnectingPeer) {
-                console.log("Already connecting to peer, ignoring room update");
-                return;
+            // If we're the initiator and a peer just joined, send them an offer
+            if (isInitiator && data.count > 1 && (!pc || pc.connectionState !== "connected")) {
+                if (isConnectingPeer) {
+                    console.log("Already connecting to peer, ignoring room update");
+                    return;
+                }
+
+                console.log("New peer detected, sending offer");
+                const needTurn = deviceType === "mobile" || (data.devices ? data.devices.includes("mobile") : false);
+                await setupPeerConnection(needTurn);
+                createDataChannel();
+                await createAndSendOffer();
             }
 
-            console.log("New peer detected, sending offer");
-            const needTurn = deviceType === "mobile" || data.devices?.includes("mobile");
-            await setupPeerConnection(needTurn);
-            createDataChannel();
-            createAndSendOffer();
-        }
-
-        // If all peers left, cleanup
-        if (data.count <= 1 && pc) {
-            console.log("All peers left, cleaning up connection");
-            cleanupPeerConnection();
+            // If all peers left, cleanup
+            if (data.count <= 1 && pc) {
+                console.log("All peers left, cleaning up connection");
+                cleanupPeerConnection();
+            }
+        } catch (err) {
+            console.error("Error handling room update:", err);
+            status.textContent = "Error updating room state.";
         }
     }
 
     // Create a new WebRTC peer connection
     async function setupPeerConnection(useTurn) {
-        // Clean up any existing connection
-        if (pc) {
-            cleanupPeerConnection();
-        }
-
         isConnectingPeer = true;
         console.log(`Creating peer connection (using TURN: ${useTurn})`);
 
@@ -255,6 +265,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     // If STUN failed, try with TURN
                     if (!useTurn && isInitiator) {
                         console.log("Connection failed, retrying with TURN");
+                        cleanupPeerConnection();
                         setupPeerConnection(true);
                         createDataChannel();
                         createAndSendOffer();
@@ -267,6 +278,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 if (pc.iceConnectionState === "failed" && !useTurn && isInitiator) {
                     console.log("ICE connection failed, retrying with TURN");
+                    cleanupPeerConnection();
                     setupPeerConnection(true);
                     createDataChannel();
                     createAndSendOffer();
@@ -284,6 +296,7 @@ document.addEventListener("DOMContentLoaded", () => {
             console.error("Error setting up peer connection:", err);
             isConnectingPeer = false;
             status.textContent = "Failed to create peer connection.";
+            throw err;
         }
     }
 
@@ -303,6 +316,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }));
         } catch (err) {
             console.error("Error creating offer:", err);
+            throw err;
         }
     }
 
@@ -334,6 +348,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }));
         } catch (err) {
             console.error("Error handling offer:", err);
+            throw err;
         }
     }
 
@@ -355,6 +370,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             console.error("Error handling answer:", err);
+            throw err;
         }
     }
 
@@ -371,6 +387,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             console.error("Error adding ICE candidate:", err);
+            throw err;
         }
     }
 
@@ -384,6 +401,7 @@ document.addEventListener("DOMContentLoaded", () => {
             setupDataChannel(dc);
         } catch (err) {
             console.error("Error creating data channel:", err);
+            status.textContent = "Error creating data channel.";
         }
     }
 
@@ -431,6 +449,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     status.textContent = `Receiving: ${fileMetadata.name}`;
                 } catch (err) {
                     console.error("Error parsing file metadata:", err);
+                    status.textContent = "Error parsing file metadata.";
                 }
                 return;
             }
@@ -542,11 +561,11 @@ document.addEventListener("DOMContentLoaded", () => {
             setTimeout(() => {
                 progressBar.style.display = "none";
             }, 2000);
-
         } catch (err) {
             console.error("Error sending file:", err);
             status.textContent = "Error sending file.";
             progressBar.style.display = "none";
+            throw err;
         }
     }
 
@@ -581,14 +600,18 @@ document.addEventListener("DOMContentLoaded", () => {
         joinRoom(room);
     });
 
-    sendBtn.addEventListener("click", () => {
+    sendBtn.addEventListener("click", async () => {
         const file = fileInput.files[0];
         if (!file) {
             status.textContent = "Please select a file first.";
             return;
         }
 
-        sendFile(file);
+        try {
+            await sendFile(file);
+        } catch (err) {
+            console.error("Error in sendFile:", err);
+        }
     });
 
     // Allow pressing Enter in room input
