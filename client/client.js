@@ -56,7 +56,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const hardcodedTurn = [
             ...stunServers,
             {
-                urls: "turns:global.relay.metered.ca:443?transport=tcp",
+                urls: "turns:standard.relay.metered.ca:443?transport=tcp",
                 username: "846538aa24ea50d97dd15a71",
                 credential: "reAP96J/diZKhFyL"
             }
@@ -74,7 +74,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 const iceServers = await response.json();
                 console.log("TURN credentials response:", JSON.stringify(iceServers, null, 2));
-                const hasExpectedServers = iceServers.some(server => server.urls.includes("global.relay.metered.ca"));
+                const hasExpectedServers = iceServers.some(server => server.urls.includes("standard.relay.metered.ca"));
                 if (!hasExpectedServers) {
                     console.warn("No expected Metered servers in response, using hardcoded TURN");
                     return hardcodedTurn;
@@ -83,7 +83,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 // Use only STUN and TCP/TLS TURN to optimize for mobile NAT
                 const streamlinedServers = [
                     ...stunServers,
-                    ...iceServers.filter(server => server.urls.includes("turns:global.relay.metered.ca:443")).slice(0, 1)
+                    ...iceServers.filter(server => server.urls.includes("turns:standard.relay.metered.ca:443")).slice(0, 1)
                 ];
                 console.log("Streamlined ICE servers:", JSON.stringify(streamlinedServers, null, 2));
                 return streamlinedServers.length > 1 ? streamlinedServers : hardcodedTurn;
