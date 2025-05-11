@@ -14,16 +14,15 @@ document.addEventListener("DOMContentLoaded", () => {
     const CHUNK_SIZE = 262144; // 256KB chunks
     const MAX_BUFFERED_AMOUNT = 4194304; // 4MB buffer threshold
     const PROGRESS_UPDATE_INTERVAL = 1; // Update progress every 1%
-    const RECONNECT_TIMEOUT = 10000; // 10 seconds
-    const MAX_RECONNECT_ATTEMPTS = 5;
     const WS_TIMEOUT = 20000; // 20s timeout for Koyeb server wakeup
+    const CONNECTION_TIMEOUT = 15000; // 15s timeout for peer connection
     const MAX_CONNECTION_RETRIES = 3; // Limit peer connection retries
-    const TURN_FETCH_RETRIES = 2; // Retry /turn-credentials fetch
+    const TURN_FETCH_RETRIES = 3; // Retry /turn-credentials fetch
 
     // State variables
-    let ws = null;
-    let pc = null;
-    let dc = null;
+    let ws = null; // WebSocket connection
+    let pc = null; // Peer Connection
+    let dc = null; // DataChannel
     let isInitiator = false;
     let currentRoom = "";
     let reconnectAttempts = 0;
@@ -145,17 +144,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Handle reconnection attempts
     function attemptReconnect() {
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        if (reconnectAttempts >= MAX_CONNECTION_RETRIES) {
             status.textContent = "Failed to reconnect after multiple attempts.";
             console.log("Max reconnect attempts reached");
             return;
         }
 
         reconnectAttempts++;
-        status.textContent = `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
-        console.log(`Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+        status.textContent = `Reconnecting... (${reconnectAttempts}/${MAX_CONNECTION_RETRIES})`;
+        console.log(`Reconnect attempt ${reconnectAttempts}/${MAX_CONNECTION_RETRIES}`);
 
-        setTimeout(connectWebSocket, RECONNECT_TIMEOUT);
+        setTimeout(connectWebSocket, CONNECTION_TIMEOUT);
     }
 
     // Process messages from the signaling server
@@ -238,7 +237,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
                 if (connectionRetries >= MAX_CONNECTION_RETRIES) {
                     console.log("Max connection retries reached, stopping attempts");
-                    status.textContent = "Unable to connect to peer after multiple attempts.";
+                    status.textContent = `Connection failed after ${MAX_CONNECTION_RETRIES} attempts`;
                     return;
                 }
 
@@ -261,10 +260,28 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    // Handle retrying peer connection
+    async function retryConnection(useTurn) {
+        if (connectionRetries < MAX_CONNECTION_RETRIES) {
+            // Automatically retry connection
+            console.log(`Retrying connection (attempt ${connectionRetries + 1}/${MAX_CONNECTION_RETRIES})`);
+            status.textContent = `Retrying connection (${connectionRetries}/${MAX_CONNECTION_RETRIES})`;
+            await setupPeerConnection(useTurn);
+            if (isInitiator) {
+                createDataChannel();
+                await createAndSendOffer();
+            }
+        } else {
+            // Max retries reached
+            console.log("Max connection retries reached");
+            status.textContent = `Connection failed after ${MAX_CONNECTION_RETRIES} attempts`;
+        }
+    }
+
     // Create a new WebRTC peer connection
     async function setupPeerConnection(useTurn) {
         isConnectingPeer = true;
-        console.log(`Creating peer connection (using TURN: ${useTurn})`);
+        console.log(`Creating peer connection (using TURN: ${useTurn}, attempt ${connectionRetries + 1}/${MAX_CONNECTION_RETRIES})`);
 
         try {
             // Get appropriate ICE servers
@@ -276,13 +293,13 @@ document.addEventListener("DOMContentLoaded", () => {
             // Set up timeout for connection
             const connectionTimeout = setTimeout(() => {
                 if (pc.connectionState !== "connected") {
-                    console.log(`Connection timed out (TURN: ${useTurn}), closing connection`);
+                    console.log(`Connection timed out after ${CONNECTION_TIMEOUT/1000}s (TURN: ${useTurn})`);
                     cleanupPeerConnection();
-                    status.textContent = "Failed to connect to peer. Please try again.";
                     isConnectingPeer = false;
                     connectionRetries++;
+                    retryConnection(useTurn);
                 }
-            }, 30000); // 30-second timeout for mobile NAT
+            }, CONNECTION_TIMEOUT); // 15-second timeout for faster retries
 
             // Set up event handlers
             pc.onicecandidate = ({ candidate }) => {
@@ -310,9 +327,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     console.log(`Connection failed (TURN: ${useTurn})`);
                     clearTimeout(connectionTimeout);
                     cleanupPeerConnection();
-                    status.textContent = "Peer connection failed. Please try again.";
                     isConnectingPeer = false;
                     connectionRetries++;
+                    retryConnection(useTurn);
                 }
             };
 
@@ -322,9 +339,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     console.log(`ICE connection failed (TURN: ${useTurn})`);
                     clearTimeout(connectionTimeout);
                     cleanupPeerConnection();
-                    status.textContent = "ICE connection failed. Please try again.";
                     isConnectingPeer = false;
                     connectionRetries++;
+                    retryConnection(useTurn);
                 }
             };
 
@@ -338,9 +355,8 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (err) {
             console.error("Error setting up peer connection:", err.message);
             isConnectingPeer = false;
-            status.textContent = "Failed to create peer connection.";
             connectionRetries++;
-            throw err;
+            retryConnection(useTurn);
         }
     }
 
