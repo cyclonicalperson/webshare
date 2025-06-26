@@ -6,8 +6,25 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
   globalIgnores(['dist']),
+  // Node.js/server files (CommonJS)
+  {
+    files: ['server.js', 'server/**/*.js', 'api/**/*.js'], // add other Node entrypoints as needed
+    languageOptions: {
+      ecmaVersion: 2020,
+      sourceType: 'script', // CommonJS
+      globals: {
+        ...globals.node,
+      },
+    },
+    env: { node: true },
+    rules: {
+      // Optionally, you can add Node-specific rules here
+    },
+  },
+  // Browser/React files
   {
     files: ['**/*.{js,jsx}'],
+    ignores: ['server.js', 'server/**/*.js', 'api/**/*.js'], // don't double-lint Node files
     extends: [
       js.configs.recommended,
       reactHooks.configs['recommended-latest'],

@@ -6,9 +6,9 @@ const CHUNK_SIZE = 262144;
 const MAX_BUFFERED_AMOUNT = 4194304;
 const PROGRESS_UPDATE_INTERVAL = 1;
 const WS_TIMEOUT = 20000;
-const CONNECTION_TIMEOUT = 30000; // Increased from 15s
-const MAX_CONNECTION_RETRIES = 5; // Increased from 3
-const TURN_FETCH_RETRIES = 3;// New: Wait for ICE gathering
+const CONNECTION_TIMEOUT = 15000;
+const MAX_CONNECTION_RETRIES = 5;
+const TURN_FETCH_RETRIES = 3; // Wait for ICE gathering
 
 // --- Device detection ---
 function detectDeviceType() {
@@ -22,7 +22,7 @@ function detectDeviceType() {
 export function useWebRTC(callback, deps) {
     // --- State variables ---
     const [room, setRoom] = useState("");
-    const [peers, setPeers] = useState(1);
+    const [peers, setPeers] = useState(0);
     const [connected, setConnected] = useState(false);
     const [fileName, setFileName] = useState("");
     const [progress, setProgress] = useState(0);
@@ -55,7 +55,7 @@ export function useWebRTC(callback, deps) {
         ];
 
         if (!useTurn) {
-            console.log("Using enhanced STUN configuration:", JSON.stringify(stunServers, null, 2));
+            console.log("Using STUN configuration:", JSON.stringify(stunServers, null, 2));
             return stunServers;
         }
 
@@ -186,7 +186,7 @@ export function useWebRTC(callback, deps) {
         setTimeout(connectWebSocket, delay);
     }
 
-    // --- Enhanced WebSocket message handler ---
+    // --- WebSocket message handler ---
     async function handleWebSocketMessage(event) {
         try {
             const data = JSON.parse(event.data);
@@ -220,7 +220,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Enhanced room join logic ---
+    // --- Room join logic ---
     async function handleRoomJoined(data) {
         try {
             console.log(`Joined room: ${data.room}, initiator: ${data.initiator}, peers: ${data.count}`);
@@ -254,7 +254,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Enhanced room update logic ---
+    // --- Room update logic ---
     async function handleRoomUpdate(data) {
         try {
             setPeers(data.count);
@@ -307,7 +307,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Enhanced retry logic with progressive TURN usage ---
+    // --- Retry logic with progressive TURN usage ---
     async function retryConnection(useTurn) {
         if (connectionRetries.current < MAX_CONNECTION_RETRIES) {
             connectionRetries.current++;
@@ -336,7 +336,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Enhanced peer connection setup ---
+    // --- Peer connection setup ---
     async function setupPeerConnection(useTurn) {
         // Clean up existing connection
         if (pc.current) {
@@ -358,7 +358,7 @@ export function useWebRTC(callback, deps) {
         try {
             const iceServers = await getIceServers(useTurn);
 
-            // Enhanced RTCPeerConnection configuration
+            // RTCPeerConnection configuration
             const config = {
                 iceServers,
                 iceCandidatePoolSize: 10, // Pre-gather ICE candidates
@@ -371,7 +371,7 @@ export function useWebRTC(callback, deps) {
 
             let _ICE_GATHERING_COMPLETE = false;
 
-            // Enhanced connection timeout
+            // Connection timeout
             connectionTimeout.current = setTimeout(() => {
                 if (pc.current && pc.current.connectionState !== "connected") {
                     console.log(`Connection timed out after ${CONNECTION_TIMEOUT / 1000}s (TURN: ${useTurn})`);
@@ -398,7 +398,7 @@ export function useWebRTC(callback, deps) {
                 }
             };
 
-            // Enhanced connection state monitoring
+            // Connection state monitoring
             pc.current.onconnectionstatechange = () => {
                 const state = pc.current.connectionState;
                 console.log("Connection state changed:", state);
@@ -438,7 +438,7 @@ export function useWebRTC(callback, deps) {
                 }
             };
 
-            // Enhanced ICE connection state monitoring
+            // ICE connection state monitoring
             pc.current.oniceconnectionstatechange = () => {
                 const state = pc.current.iceConnectionState;
                 console.log("ICE connection state:", state);
@@ -486,11 +486,11 @@ export function useWebRTC(callback, deps) {
         } catch (err) {
             console.error("Error setting up peer connection:", err.message);
             isConnectingPeer.current = false;
-            retryConnection(useTurn);
+            await retryConnection(useTurn);
         }
     }
 
-    // --- Enhanced offer creation with ICE gathering wait ---
+    // --- Offer creation with ICE gathering wait ---
     async function createAndSendOffer() {
         if (!pc.current || !ws.current || ws.current.readyState !== window.WebSocket.OPEN) {
             console.log("Cannot create offer: peer connection or websocket not ready");
@@ -522,11 +522,11 @@ export function useWebRTC(callback, deps) {
         } catch (err) {
             console.error("Error creating offer:", err.message);
             setStatus("Error creating offer.");
-            retryConnection(false);
+            await retryConnection(false);
         }
     }
 
-    // --- Enhanced remote offer handling ---
+    // --- Remote offer handling ---
     async function handleRemoteOffer(offer) {
         if (!pc.current) {
             console.log("⚠️ Received offer but no peer connection exists");
@@ -570,11 +570,11 @@ export function useWebRTC(callback, deps) {
         } catch (err) {
             console.error("Error handling offer:", err.message);
             setStatus("Error processing offer.");
-            retryConnection(false);
+            await retryConnection(false);
         }
     }
 
-    // --- Enhanced remote answer handling ---
+    // --- Remote answer handling ---
     async function handleRemoteAnswer(answer) {
         if (!pc.current) {
             console.log("⚠️ Received answer but no peer connection exists");
@@ -601,7 +601,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Enhanced ICE candidate handling ---
+    // --- ICE candidate handling ---
     async function handleRemoteIceCandidate(candidate) {
         if (!candidate || !candidate.candidate) {
             console.log("Received empty ICE candidate (end-of-candidates)");
@@ -644,7 +644,7 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Data channel setup (unchanged from original) ---
+    // --- Data channel setup ---
     function setupDataChannel(channel) {
         dc.current = channel;
         dc.current.binaryType = "arraybuffer";
