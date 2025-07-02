@@ -688,13 +688,18 @@ export function useWebRTC(callback, deps) {
             async function processQueue() {
                 while (sendQueue.current.length > 0) {
                     if (!dc.current || dc.current.readyState !== "open" || !pc.current || pc.current.connectionState !== "connected") {
-                        setStatus("Connection lost during send.");
+                        setStatus("Connection lost during send");
                         cleanupPeerConnection();
                         return;
                     }
 
                     while (dc.current && dc.current.bufferedAmount > BUFFER_THRESHOLD) {
                         await new Promise(resolve => setTimeout(resolve, BUFFER_POLL_INTERVAL));
+                        if (!dc.current || dc.current.readyState !== "open") {
+                            setStatus("Data channel closed during buffer wait");
+                            cleanupPeerConnection();
+                            return;
+                        }
                     }
 
                     const slice = sendQueue.current.shift();
@@ -709,7 +714,7 @@ export function useWebRTC(callback, deps) {
                             }
                             try {
                                 if (!dc.current || dc.current.readyState !== "open") {
-                                    setStatus("Data channel closed during send");
+                                    setStatus("Data channel closed before sending chunk");
                                     cleanupPeerConnection();
                                     return reject();
                                 }
@@ -751,7 +756,7 @@ export function useWebRTC(callback, deps) {
 
             await processQueue();
         } catch {
-            setStatus("Error sending file");
+            setStatus("Error initiating file send");
             cleanupPeerConnection();
         }
     }, [deviceType]);
