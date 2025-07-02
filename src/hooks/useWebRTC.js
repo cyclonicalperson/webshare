@@ -776,64 +776,160 @@ export function useWebRTC(callback, deps) {
         setFileName(file ? file.name : "");
     }, []);
 
-    const sendFile = useCallback(() => {
-        if (!fileRef.current || !dc.current || dc.current.readyState !== "open") return;
-        setSending(true);
-        setProgressVisible(true);
-        setStatus(`Sending: ${fileRef.current.name}`);
-        setProgress(0);
+    const sendFile = useCallback(async () => {
+        if (!fileRef.current || !dc.current || dc.current.readyState !== "open") {
+            setStatus("No active data channel. Please connect to a peer.");
+            console.log("Send failed: Data channel not open");
+            return;
+        }
+        if (!pc.current || pc.current.connectionState !== "connected") {
+            setStatus("Peer connection not active. Please reconnect.");
+            console.log("Send failed: Peer connection not active");
+            return;
+        }
 
-        // Send metadata
-        dc.current.send(JSON.stringify({
-            name: fileRef.current.name,
-            size: fileRef.current.size,
-            type: fileRef.current.type
-        }));
+        try {
+            setSending(true);
+            setProgressVisible(true);
+            setStatus(`Sending: ${fileRef.current.name}`);
+            setProgress(0);
 
-        // Send file in chunks
-        const file = fileRef.current;
-        let offset = 0;
-        let lastProgress = 0;
+            const file = fileRef.current;
+            const metadata = {
+                name: file.name,
+                size: file.size,
+                type: file.type
+            };
+            console.log("Sending metadata:", metadata);
+            dc.current.send(JSON.stringify(metadata));
 
-        function sendChunk() {
-            if (!dc.current || dc.current.readyState !== "open") {
-                setStatus("Data channel closed.");
-                setSending(false);
-                setProgressVisible(false);
-                return;
-            }
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                if (e.target.error) {
+            let offset = 0;
+            let lastProgress = 0;
+
+            async function sendChunk() {
+                if (!dc.current || dc.current.readyState !== "open") {
+                    console.error("Data channel closed during file send");
+                    setStatus("Data channel closed during send.");
+                    setSending(false);
+                    setProgressVisible(false);
+                    setProgress(0);
+                    setFileName("");
+                    fileRef.current = null;
+                    return;
+                }
+                if (!pc.current || pc.current.connectionState !== "connected") {
+                    console.error("Peer connection lost during file send");
+                    setStatus("Peer connection lost during send.");
+                    setSending(false);
+                    setProgressVisible(false);
+                    setProgress(0);
+                    setFileName("");
+                    fileRef.current = null;
+                    return;
+                }
+
+                // Poll buffer until below threshold
+                const BUFFER_THRESHOLD = 1048576; // 1MB
+                const BUFFER_POLL_INTERVAL = 100; // 100ms
+                while (dc.current.bufferedAmount > BUFFER_THRESHOLD) {
+                    console.log(`Buffer at ${dc.current.bufferedAmount} bytes, waiting...`);
+                    await new Promise(resolve => setTimeout(resolve, BUFFER_POLL_INTERVAL));
+                    if (!dc.current || dc.current.readyState !== "open") {
+                        console.error("Data channel closed while waiting for buffer");
+                        setStatus("Data channel closed during send.");
+                        setSending(false);
+                        setProgressVisible(false);
+                        setProgress(0);
+                        setFileName("");
+                        fileRef.current = null;
+                        return;
+                    }
+                }
+
+                const slice = file.slice(offset, offset + CHUNK_SIZE);
+                const reader = new FileReader();
+
+                reader.onload = (e) => {
+                    try {
+                        if (e.target.error) {
+                            console.error("FileReader error:", e.target.error);
+                            setStatus("Error reading file chunk.");
+                            setSending(false);
+                            setProgressVisible(false);
+                            setProgress(0);
+                            setFileName("");
+                            fileRef.current = null;
+                            return;
+                        }
+                        if (!e.target.result || e.target.result.byteLength === 0) {
+                            console.error("FileReader returned empty result");
+                            setStatus("Error reading file chunk.");
+                            setSending(false);
+                            setProgressVisible(false);
+                            setProgress(0);
+                            setFileName("");
+                            fileRef.current = null;
+                            return;
+                        }
+
+                        console.log(`Sending chunk at offset ${offset}, size ${e.target.result.byteLength}`);
+                        dc.current.send(e.target.result);
+                        offset += e.target.result.byteLength;
+                        const prog = Math.min(100, Math.round((offset / file.size) * 100));
+                        if (prog >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
+                            setProgress(prog);
+                            lastProgress = Math.floor(prog / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
+                        }
+
+                        if (offset < file.size) {
+                            sendChunk();
+                        } else {
+                            console.log("File transfer completed");
+                            setStatus("File sent successfully!");
+                            setProgress(100);
+                            setTimeout(() => {
+                                setProgressVisible(false);
+                                setProgress(0);
+                                setStatus("Connected! Ready to send files.");
+                                setSending(false);
+                                setFileName("");
+                                fileRef.current = null;
+                            }, 2000);
+                        }
+                    } catch (err) {
+                        console.error("Error sending chunk:", err.message);
+                        setStatus("Error sending file chunk.");
+                        setSending(false);
+                        setProgressVisible(false);
+                        setProgress(0);
+                        setFileName("");
+                        fileRef.current = null;
+                    }
+                };
+
+                reader.onerror = (err) => {
+                    console.error("FileReader error:", err);
                     setStatus("Error reading file.");
                     setSending(false);
                     setProgressVisible(false);
-                    return;
-                }
-                dc.current.send(e.target.result);
-                offset += CHUNK_SIZE;
-                const prog = Math.min(100, (offset / file.size) * 100);
-                if (prog >= lastProgress + PROGRESS_UPDATE_INTERVAL || offset >= file.size) {
-                    setProgress(prog);
-                    lastProgress = Math.floor(prog / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
-                }
-                if (offset < file.size) {
-                    if (dc.current.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-                        sendChunk();
-                    } else {
-                        setTimeout(sendChunk, 100);
-                    }
-                } else {
-                    setProgress(100);
-                    setStatus("File sent!");
-                    setSending(false);
-                    setProgressVisible(false);
-                }
-            };
-            reader.readAsArrayBuffer(slice);
+                    setProgress(0);
+                    setFileName("");
+                    fileRef.current = null;
+                };
+
+                reader.readAsArrayBuffer(slice);
+            }
+
+            await sendChunk();
+        } catch (err) {
+            console.error("Error sending file:", err.message);
+            setStatus("Error sending file.");
+            setSending(false);
+            setProgressVisible(false);
+            setProgress(0);
+            setFileName("");
+            fileRef.current = null;
         }
-        sendChunk();
     }, []);
 
     // --- Return API for React UI ---
