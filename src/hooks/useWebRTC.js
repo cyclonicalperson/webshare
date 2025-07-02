@@ -2,17 +2,15 @@ import { useState, useRef, useCallback } from "react";
 
 // --- Constants ---
 const SERVER_URL = "wss://primary-tove-arsenijevicdev-4f187706.koyeb.app";
-const BASE_CHUNK_SIZE = 32768; // Start with 32KB chunks
-const FALLBACK_CHUNK_SIZE = 8192; // Fall back to 8KB if issues detected
+const BASE_CHUNK_SIZE = 32768;
+const FALLBACK_CHUNK_SIZE = 8192;
 const PROGRESS_UPDATE_INTERVAL = 1;
 const WS_TIMEOUT = 20000;
 const CONNECTION_TIMEOUT = 8000;
 const MAX_CONNECTION_RETRIES = 5;
 const TURN_FETCH_RETRIES = 3;
-const BUFFER_THRESHOLD = 393216; // 384KB buffer threshold
-const BUFFER_POLL_INTERVAL = 25; // Faster polling
-const TRANSFER_TIMEOUT = 60000;
-const BUFFER_STALL_TIMEOUT = 10000;
+const BUFFER_THRESHOLD = 393216;
+const BUFFER_POLL_INTERVAL = 50;
 
 // --- Device detection ---
 function detectDeviceType() {
@@ -667,14 +665,8 @@ export function useWebRTC(callback, deps) {
             setStatus(`Sending: ${fileRef.current.name}`);
             setProgress(0);
             isSending.current = true;
-            bufferStalls.current = 0;
-            chunkSize.current = BASE_CHUNK_SIZE;
 
-            transferTimeout.current = setTimeout(() => {
-                console.error("File transfer timed out");
-                setStatus("File transfer timed out.");
-                cleanupPeerConnection();
-            }, TRANSFER_TIMEOUT);
+            const chunkSize = (deviceType === "mobile" || connectionRetries.current > 1) ? FALLBACK_CHUNK_SIZE : BASE_CHUNK_SIZE;
 
             const file = fileRef.current;
             const metadata = {
@@ -688,9 +680,9 @@ export function useWebRTC(callback, deps) {
             let lastProgress = 0;
 
             while (offset < file.size) {
-                const slice = file.slice(offset, offset + chunkSize.current);
+                const slice = file.slice(offset, offset + chunkSize);
                 sendQueue.current.push(slice);
-                offset += chunkSize.current;
+                offset += chunkSize;
             }
 
             async function processQueue() {
@@ -701,18 +693,7 @@ export function useWebRTC(callback, deps) {
                         return;
                     }
 
-                    const startTime = Date.now();
-                    while (dc.current.bufferedAmount > BUFFER_THRESHOLD) {
-                        if (Date.now() - startTime > BUFFER_STALL_TIMEOUT) {
-                            bufferStalls.current++;
-                            if (bufferStalls.current >= 3) {
-                                chunkSize.current = Math.max(FALLBACK_CHUNK_SIZE, chunkSize.current / 2);
-                                console.warn(`Buffer stall detected, reducing chunk size to ${chunkSize.current}`);
-                            }
-                            setStatus("Buffer stall detected during send.");
-                            cleanupPeerConnection();
-                            return;
-                        }
+                    while (dc.current && dc.current.bufferedAmount > BUFFER_THRESHOLD) {
                         await new Promise(resolve => setTimeout(resolve, BUFFER_POLL_INTERVAL));
                     }
 
@@ -722,35 +703,58 @@ export function useWebRTC(callback, deps) {
                     await new Promise((resolve, reject) => {
                         reader.onload = (e) => {
                             if (e.target.error || !e.target.result || e.target.result.byteLength === 0) {
-                                reject(new Error("FileReader error or empty result"));
-                                return;
+                                setStatus("FileReader error or empty result");
+                                cleanupPeerConnection();
+                                return reject();
                             }
                             try {
+                                if (!dc.current || dc.current.readyState !== "open") {
+                                    setStatus("Data channel closed during send");
+                                    cleanupPeerConnection();
+                                    return reject();
+                                }
                                 dc.current.send(e.target.result);
-                                const sentBytes = offset - (sendQueue.current.length * chunkSize.current);
+                                const sentBytes = offset - (sendQueue.current.length * chunkSize);
                                 const prog = Math.min(100, Math.round((sentBytes / file.size) * 100));
                                 if (prog >= lastProgress + PROGRESS_UPDATE_INTERVAL || sentBytes >= file.size) {
                                     setProgress(prog);
                                     lastProgress = Math.floor(prog / PROGRESS_UPDATE_INTERVAL) * PROGRESS_UPDATE_INTERVAL;
                                 }
                                 resolve();
-                            } catch (error) {
-                                reject(error);
+                            } catch {
+                                setStatus("Error sending file chunk");
+                                cleanupPeerConnection();
+                                reject();
                             }
                         };
-                        reader.onerror = () => reject(new Error("FileReader error"));
+                        reader.onerror = () => {
+                            setStatus("FileReader error");
+                            cleanupPeerConnection();
+                            reject();
+                        };
                         reader.readAsArrayBuffer(slice);
                     });
                 }
+
+                setProgress(100);
+                setStatus("File sent successfully!");
+                setTimeout(() => {
+                    setProgressVisible(false);
+                    setProgress(0);
+                    setStatus("Connected! Ready to send files.");
+                    setSending(false);
+                    setFileName("");
+                    fileRef.current = null;
+                    isSending.current = false;
+                }, 2000);
             }
 
             await processQueue();
-        } catch (error) {
-            console.error("Error sending file:", error.message);
-            setStatus("Error sending file.");
+        } catch {
+            setStatus("Error sending file");
             cleanupPeerConnection();
         }
-    }, []);
+    }, [deviceType]);
 
     return {
         room,
