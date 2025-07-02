@@ -49,8 +49,6 @@ export function useWebRTC(callback, deps) {
     const sendQueue = useRef([]);
     const isSending = useRef(false);
     const transferTimeout = useRef(null);
-    const chunkSize = useRef(BASE_CHUNK_SIZE); // Dynamic chunk size
-    const bufferStalls = useRef(0);
 
     // --- ICE servers ---
     async function getIceServers(useTurn = false) {
@@ -246,7 +244,7 @@ export function useWebRTC(callback, deps) {
     async function handleRoomUpdate(data) {
         try {
             setPeers(data.count);
-            if (isInitiator.current && data.count > 1 && !isConnectingPeer.current) {
+            if (isInitiator.current && data.count > 1) {
                 if (pc.current && pc.current.connectionState === "connected") return;
 
                 if (connectionRetries.current >= MAX_CONNECTION_RETRIES) {
@@ -254,6 +252,7 @@ export function useWebRTC(callback, deps) {
                     return;
                 }
 
+                isConnectingPeer.current = false; // Reset to allow new connection
                 const needTurn = deviceType === "mobile" || (data.peerTypes && data.peerTypes.includes("mobile")) || connectionRetries.current > 1;
                 await setupPeerConnection(needTurn);
                 createDataChannel();
@@ -267,8 +266,7 @@ export function useWebRTC(callback, deps) {
                 connectionRetries.current = 0;
                 setStatus("Waiting for peers...");
             }
-        } catch (error) {
-            console.error("Error handling room update:", error.message);
+        } catch {
             setStatus("Error updating room state.");
         }
     }
@@ -523,31 +521,28 @@ export function useWebRTC(callback, deps) {
         };
 
         dc.current.onclose = () => {
-            setStatus("File transfer channel closed.");
-            setConnected(false);
+            if (!isConnectingPeer.current) {
+                setStatus("File transfer channel closed.");
+                setConnected(false);
+            }
         };
 
         dc.current.onerror = () => {
             setStatus("Error with file transfer.");
+            setConnected(false);
         };
 
         dc.current.onmessage = (event) => {
             if (typeof event.data === "string") {
                 try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === "transfer-complete") {
-                        dc.current.send(JSON.stringify({ type: "transfer-complete-ack" }));
-                        return;
-                    }
-                    fileMetadata = data;
+                    fileMetadata = JSON.parse(event.data);
                     receivedChunks = [];
                     receivedSize = 0;
                     lastProgress = 0;
                     setProgressVisible(true);
                     setProgress(0);
                     setStatus(`Receiving: ${fileMetadata.name}`);
-                } catch (error) {
-                    console.error("Error parsing file metadata:", error.message);
+                } catch {
                     setStatus("Error parsing file metadata.");
                 }
                 return;
@@ -567,9 +562,6 @@ export function useWebRTC(callback, deps) {
                     setProgress(100);
                     setProgressVisible(false);
                     setStatus(`Received: ${fileMetadata.name}`);
-                    if (dc.current && dc.current.readyState === "open") {
-                        dc.current.send(JSON.stringify({ type: "transfer-complete" }));
-                    }
                     const blob = new Blob(receivedChunks);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
@@ -592,13 +584,8 @@ export function useWebRTC(callback, deps) {
         setSending(false);
         isSending.current = false;
         sendQueue.current = [];
-        bufferStalls.current = 0;
-        chunkSize.current = BASE_CHUNK_SIZE;
+        isConnectingPeer.current = false; // Ensure reset for new connections
 
-        if (transferTimeout.current) {
-            clearTimeout(transferTimeout.current);
-            transferTimeout.current = null;
-        }
         if (connectionTimeout.current) {
             clearTimeout(connectionTimeout.current);
             connectionTimeout.current = null;
@@ -616,7 +603,6 @@ export function useWebRTC(callback, deps) {
             pc.current = null;
         }
         pendingIceCandidates.current = [];
-        isConnectingPeer.current = false;
     }
 
     // --- Public API ---
