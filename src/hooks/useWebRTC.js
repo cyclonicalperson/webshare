@@ -3,10 +3,9 @@ import { useState, useRef, useCallback } from "react";
 // --- Constants ---
 const SERVER_URL = "wss://primary-tove-arsenijevicdev-4f187706.koyeb.app";
 const CHUNK_SIZE = 262144;
-const MAX_BUFFERED_AMOUNT = 4194304;
 const PROGRESS_UPDATE_INTERVAL = 1;
 const WS_TIMEOUT = 20000;
-const CONNECTION_TIMEOUT = 15000;
+const CONNECTION_TIMEOUT = 5000;
 const MAX_CONNECTION_RETRIES = 5;
 const TURN_FETCH_RETRIES = 3; // Wait for ICE gathering
 
@@ -78,9 +77,7 @@ export function useWebRTC(callback, deps) {
         while (attempt <= TURN_FETCH_RETRIES) {
             try {
                 console.log(`Fetching TURN servers (attempt ${attempt + 1}/${TURN_FETCH_RETRIES + 1})...`);
-                const response = await fetch(`${SERVER_URL.replace("wss:", "https:")}/turn-credentials`, {
-                    timeout: 5000 // Add timeout to prevent hanging
-                });
+                const response = await fetch(`${SERVER_URL.replace("wss:", "https:")}/turn-credentials`);
 
                 if (response.ok) {
                     const iceServers = await response.json();
@@ -97,8 +94,8 @@ export function useWebRTC(callback, deps) {
                     console.log("Combined ICE servers:", JSON.stringify(combinedServers, null, 2));
                     return combinedServers.length > stunServers.length ? combinedServers : fallbackTurnServers;
                 } else {
-                    console.warn(`TURN fetch failed: ${response.status} ${response.statusText}`);
-                    throw new Error(`HTTP ${response.status}`);
+                    console.warn(`TURN fetch failed: ${response.status} ${response.statusText}, using fallback`);
+                    return fallbackTurnServers;
                 }
 
             } catch (err) {
@@ -582,19 +579,16 @@ export function useWebRTC(callback, deps) {
         }
 
         try {
-            console.log("📥 Processing remote answer:", answer);
-            await pc.current.setRemoteDescription(new window.RTCSessionDescription(answer));
-
-            // Process any queued ICE candidates
-            console.log(`Processing ${pendingIceCandidates.current.length} queued ICE candidates`);
-            while (pendingIceCandidates.current.length > 0) {
-                const candidate = pendingIceCandidates.current.shift();
-                try {
-                    await pc.current.addIceCandidate(candidate);
-                } catch (err) {
-                    console.warn("Failed to add queued ICE candidate:", err.message);
-                }
+            console.log("📥 Processing remote answer:", answer, `signalingState: ${pc.current.signalingState}`);
+            if (pc.current.signalingState !== "have-local-offer") {
+                console.warn(`Cannot set remote answer in state ${pc.current.signalingState}, skipping`);
+                return;
             }
+
+            // Clear queued ICE candidates before setting answer to avoid redundant processing
+            pendingIceCandidates.current = [];
+            await pc.current.setRemoteDescription(new window.RTCSessionDescription(answer));
+            console.log("✅ Remote answer set successfully");
         } catch (err) {
             console.error("Error handling answer:", err.message);
             setStatus("Error processing answer.");
