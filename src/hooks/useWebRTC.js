@@ -580,18 +580,33 @@ export function useWebRTC(callback, deps) {
 
         try {
             console.log("📥 Processing remote answer:", answer, `signalingState: ${pc.current.signalingState}`);
-            if (pc.current.signalingState !== "have-local-offer") {
-                console.warn(`Cannot set remote answer in state ${pc.current.signalingState}, skipping`);
+            if (pc.current.signalingState === "stable") {
+                console.warn(`Received answer in stable state, likely redundant, skipping`);
                 return;
             }
 
-            // Clear queued ICE candidates before setting answer to avoid redundant processing
-            pendingIceCandidates.current = [];
             await pc.current.setRemoteDescription(new window.RTCSessionDescription(answer));
             console.log("✅ Remote answer set successfully");
+
+            // Process queued ICE candidates
+            console.log(`Processing ${pendingIceCandidates.current.length} queued ICE candidates`);
+            while (pendingIceCandidates.current.length > 0) {
+                const candidate = pendingIceCandidates.current.shift();
+                try {
+                    await pc.current.addIceCandidate(candidate);
+                    console.log("✅ Added queued ICE candidate");
+                } catch (err) {
+                    console.warn("Failed to add queued ICE candidate:", err.message);
+                }
+            }
         } catch (err) {
             console.error("Error handling answer:", err.message);
             setStatus("Error processing answer.");
+            if (err.message.includes("Cannot set remote answer")) {
+                console.log("Attempting recovery by resetting peer connection");
+                cleanupPeerConnection();
+                retryConnection(false);
+            }
         }
     }
 
@@ -771,14 +786,19 @@ export function useWebRTC(callback, deps) {
     }, []);
 
     const sendFile = useCallback(async () => {
-        if (!fileRef.current || !dc.current || dc.current.readyState !== "open") {
+        if (!fileRef.current) {
+            setStatus("No file selected. Please select a file.");
+            console.log("Send failed: No file selected");
+            return;
+        }
+        if (!dc.current || dc.current.readyState !== "open") {
             setStatus("No active data channel. Please connect to a peer.");
-            console.log("Send failed: Data channel not open");
+            console.log(`Send failed: Data channel not open (dc.current: ${!!dc.current}, readyState: ${dc.current?.readyState})`);
             return;
         }
         if (!pc.current || pc.current.connectionState !== "connected") {
             setStatus("Peer connection not active. Please reconnect.");
-            console.log("Send failed: Peer connection not active");
+            console.log(`Send failed: Peer connection not active (pc.current: ${!!pc.current}, connectionState: ${pc.current?.connectionState})`);
             return;
         }
 
