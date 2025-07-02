@@ -244,7 +244,7 @@ export function useWebRTC(callback, deps) {
     async function handleRoomUpdate(data) {
         try {
             setPeers(data.count);
-            if (isInitiator.current && data.count > 1) {
+            if (data.count > 1) {
                 if (pc.current && pc.current.connectionState === "connected") return;
 
                 if (connectionRetries.current >= MAX_CONNECTION_RETRIES) {
@@ -252,19 +252,23 @@ export function useWebRTC(callback, deps) {
                     return;
                 }
 
-                isConnectingPeer.current = false; // Reset to allow new connection
-                const needTurn = deviceType === "mobile" || (data.peerTypes && data.peerTypes.includes("mobile")) || connectionRetries.current > 1;
-                await setupPeerConnection(needTurn);
-                createDataChannel();
-                setTimeout(async () => {
-                    await createAndSendOffer();
-                }, 1000);
-            }
-
-            if (data.count <= 1 && pc.current) {
+                if (isInitiator.current) {
+                    isConnectingPeer.current = false; // Reset to allow new connection
+                    cleanupPeerConnection(); // Ensure clean state
+                    const needTurn = deviceType === "mobile" || (data.peerTypes && data.peerTypes.includes("mobile")) || connectionRetries.current > 1;
+                    await setupPeerConnection(needTurn);
+                    createDataChannel();
+                    setStatus("Initiating connection...");
+                    setTimeout(async () => {
+                        await createAndSendOffer();
+                    }, 1000);
+                } else {
+                    setStatus("Waiting for initiator to connect...");
+                }
+            } else {
                 cleanupPeerConnection();
                 connectionRetries.current = 0;
-                setStatus("Waiting for peers...");
+                setStatus("Detecting peers...");
             }
         } catch {
             setStatus("Error updating room state.");
@@ -584,7 +588,7 @@ export function useWebRTC(callback, deps) {
         setSending(false);
         isSending.current = false;
         sendQueue.current = [];
-        isConnectingPeer.current = false; // Ensure reset for new connections
+        isConnectingPeer.current = false;
 
         if (connectionTimeout.current) {
             clearTimeout(connectionTimeout.current);
