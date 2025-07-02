@@ -2,14 +2,17 @@ import { useState, useRef, useCallback } from "react";
 
 // --- Constants ---
 const SERVER_URL = "wss://primary-tove-arsenijevicdev-4f187706.koyeb.app";
-const CHUNK_SIZE = 16384; // Reduced chunk size for better buffer management
+const BASE_CHUNK_SIZE = 32768; // Start with 32KB chunks
+const FALLBACK_CHUNK_SIZE = 8192; // Fall back to 8KB if issues detected
 const PROGRESS_UPDATE_INTERVAL = 1;
 const WS_TIMEOUT = 20000;
 const CONNECTION_TIMEOUT = 8000;
 const MAX_CONNECTION_RETRIES = 5;
 const TURN_FETCH_RETRIES = 3;
-const BUFFER_THRESHOLD = 524288; // 512KB buffer threshold
-const BUFFER_POLL_INTERVAL = 50;
+const BUFFER_THRESHOLD = 393216; // 384KB buffer threshold
+const BUFFER_POLL_INTERVAL = 25; // Faster polling
+const TRANSFER_TIMEOUT = 60000;
+const BUFFER_STALL_TIMEOUT = 10000;
 
 // --- Device detection ---
 function detectDeviceType() {
@@ -47,8 +50,11 @@ export function useWebRTC(callback, deps) {
     const deviceType = detectDeviceType();
     const sendQueue = useRef([]);
     const isSending = useRef(false);
+    const transferTimeout = useRef(null);
+    const chunkSize = useRef(BASE_CHUNK_SIZE); // Dynamic chunk size
+    const bufferStalls = useRef(0);
 
-    // --- Enhanced ICE servers ---
+    // --- ICE servers ---
     async function getIceServers(useTurn = false) {
         const stunServers = [
             { urls: "stun:stun.l.google.com:19302" },
@@ -96,7 +102,7 @@ export function useWebRTC(callback, deps) {
         return fallbackTurnServers;
     }
 
-    // --- Enhanced WebSocket logic ---
+    // --- WebSocket logic ---
     const connectWebSocket = useCallback(() => {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) return;
 
@@ -143,7 +149,7 @@ export function useWebRTC(callback, deps) {
             setStatus("Failed to connect to server.");
             attemptReconnect();
         }
-    }, [deps]); // Ensure deps is included to avoid stale closures
+    }, [deps, attemptReconnect, deviceType, handleWebSocketMessage]);
 
     function attemptReconnect() {
         if (reconnectAttempts.current >= MAX_CONNECTION_RETRIES) {
@@ -179,6 +185,9 @@ export function useWebRTC(callback, deps) {
                 case "room-update":
                     await handleRoomUpdate(data);
                     break;
+                case "transfer-complete":
+                    handleTransferComplete();
+                    break;
                 default:
                     console.log("Unknown message type:", data.type);
             }
@@ -188,7 +197,28 @@ export function useWebRTC(callback, deps) {
         }
     }
 
-    // --- Room join logic ---
+    // --- Successful file transfer handler ---
+    function handleTransferComplete() {
+        if (isSending.current) {
+            setProgress(100);
+            setStatus("File sent successfully!");
+            setTimeout(() => {
+                setProgressVisible(false);
+                setProgress(0);
+                setStatus("Connected! Ready to send files.");
+                setSending(false);
+                setFileName("");
+                fileRef.current = null;
+                isSending.current = false;
+                sendQueue.current = [];
+                if (transferTimeout.current) {
+                    clearTimeout(transferTimeout.current);
+                    transferTimeout.current = null;
+                }
+            }, 500);
+        }
+    }
+
     async function handleRoomJoined(data) {
         try {
             currentRoom.current = data.room;
@@ -444,7 +474,7 @@ export function useWebRTC(callback, deps) {
             setStatus("Error processing answer.");
             if (error.message.includes("Cannot set remote answer")) {
                 cleanupPeerConnection();
-                retryConnection(false);
+                await retryConnection(false);
             }
         }
     }
@@ -506,7 +536,12 @@ export function useWebRTC(callback, deps) {
         dc.current.onmessage = (event) => {
             if (typeof event.data === "string") {
                 try {
-                    fileMetadata = JSON.parse(event.data);
+                    const data = JSON.parse(event.data);
+                    if (data.type === "transfer-complete") {
+                        dc.current.send(JSON.stringify({ type: "transfer-complete-ack" }));
+                        return;
+                    }
+                    fileMetadata = data;
                     receivedChunks = [];
                     receivedSize = 0;
                     lastProgress = 0;
@@ -534,6 +569,9 @@ export function useWebRTC(callback, deps) {
                     setProgress(100);
                     setProgressVisible(false);
                     setStatus(`Received: ${fileMetadata.name}`);
+                    if (dc.current && dc.current.readyState === "open") {
+                        dc.current.send(JSON.stringify({ type: "transfer-complete" }));
+                    }
                     const blob = new Blob(receivedChunks);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
@@ -548,7 +586,7 @@ export function useWebRTC(callback, deps) {
         };
     }
 
-    // --- Enhanced cleanup ---
+    // --- Cleanup ---
     function cleanupPeerConnection() {
         setConnected(false);
         setProgressVisible(false);
@@ -556,7 +594,13 @@ export function useWebRTC(callback, deps) {
         setSending(false);
         isSending.current = false;
         sendQueue.current = [];
+        bufferStalls.current = 0;
+        chunkSize.current = BASE_CHUNK_SIZE;
 
+        if (transferTimeout.current) {
+            clearTimeout(transferTimeout.current);
+            transferTimeout.current = null;
+        }
         if (connectionTimeout.current) {
             clearTimeout(connectionTimeout.current);
             connectionTimeout.current = null;
@@ -623,6 +667,14 @@ export function useWebRTC(callback, deps) {
             setStatus(`Sending: ${fileRef.current.name}`);
             setProgress(0);
             isSending.current = true;
+            bufferStalls.current = 0;
+            chunkSize.current = BASE_CHUNK_SIZE;
+
+            transferTimeout.current = setTimeout(() => {
+                console.error("File transfer timed out");
+                setStatus("File transfer timed out.");
+                cleanupPeerConnection();
+            }, TRANSFER_TIMEOUT);
 
             const file = fileRef.current;
             const metadata = {
@@ -636,26 +688,31 @@ export function useWebRTC(callback, deps) {
             let lastProgress = 0;
 
             while (offset < file.size) {
-                const slice = file.slice(offset, offset + CHUNK_SIZE);
+                const slice = file.slice(offset, offset + chunkSize.current);
                 sendQueue.current.push(slice);
-                offset += CHUNK_SIZE;
+                offset += chunkSize.current;
             }
 
             async function processQueue() {
                 while (sendQueue.current.length > 0) {
                     if (!dc.current || dc.current.readyState !== "open" || !pc.current || pc.current.connectionState !== "connected") {
                         setStatus("Connection lost during send.");
-                        setSending(false);
-                        setProgressVisible(false);
-                        setProgress(0);
-                        setFileName("");
-                        fileRef.current = null;
-                        isSending.current = false;
-                        sendQueue.current = [];
+                        cleanupPeerConnection();
                         return;
                     }
 
+                    const startTime = Date.now();
                     while (dc.current.bufferedAmount > BUFFER_THRESHOLD) {
+                        if (Date.now() - startTime > BUFFER_STALL_TIMEOUT) {
+                            bufferStalls.current++;
+                            if (bufferStalls.current >= 3) {
+                                chunkSize.current = Math.max(FALLBACK_CHUNK_SIZE, chunkSize.current / 2);
+                                console.warn(`Buffer stall detected, reducing chunk size to ${chunkSize.current}`);
+                            }
+                            setStatus("Buffer stall detected during send.");
+                            cleanupPeerConnection();
+                            return;
+                        }
                         await new Promise(resolve => setTimeout(resolve, BUFFER_POLL_INTERVAL));
                     }
 
@@ -664,12 +721,13 @@ export function useWebRTC(callback, deps) {
 
                     await new Promise((resolve, reject) => {
                         reader.onload = (e) => {
+                            if (e.target.error || !e.target.result || e.target.result.byteLength === 0) {
+                                reject(new Error("FileReader error or empty result"));
+                                return;
+                            }
                             try {
-                                if (e.target.error || !e.target.result || e.target.result.byteLength === 0) {
-                                    throw new Error("FileReader error or empty result");
-                                }
                                 dc.current.send(e.target.result);
-                                const sentBytes = offset - (sendQueue.current.length * CHUNK_SIZE);
+                                const sentBytes = offset - (sendQueue.current.length * chunkSize.current);
                                 const prog = Math.min(100, Math.round((sentBytes / file.size) * 100));
                                 if (prog >= lastProgress + PROGRESS_UPDATE_INTERVAL || sentBytes >= file.size) {
                                     setProgress(prog);
@@ -684,35 +742,16 @@ export function useWebRTC(callback, deps) {
                         reader.readAsArrayBuffer(slice);
                     });
                 }
-
-                setProgress(100);
-                setStatus("File sent successfully!");
-                setTimeout(() => {
-                    setProgressVisible(false);
-                    setProgress(0);
-                    setStatus("Connected! Ready to send files.");
-                    setSending(false);
-                    setFileName("");
-                    fileRef.current = null;
-                    isSending.current = false;
-                }, 2000);
             }
 
             await processQueue();
         } catch (error) {
             console.error("Error sending file:", error.message);
             setStatus("Error sending file.");
-            setSending(false);
-            setProgressVisible(false);
-            setProgress(0);
-            setFileName("");
-            fileRef.current = null;
-            isSending.current = false;
-            sendQueue.current = [];
+            cleanupPeerConnection();
         }
     }, []);
 
-    // --- Return API ---
     return {
         room,
         setRoom,
