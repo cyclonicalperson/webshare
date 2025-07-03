@@ -244,7 +244,12 @@ export function useWebRTC(callback, deps) {
     async function handleRoomUpdate(data) {
         try {
             setPeers(data.count);
-            if (data.count > 1) {
+            if (data.count === 1) {
+                isInitiator.current = true; // Force initiator role for the remaining peer
+                cleanupPeerConnection();
+                connectionRetries.current = 0;
+                setStatus("Ready to initiate connection...");
+            } else if (data.count > 1) {
                 if (pc.current && pc.current.connectionState === "connected") return;
 
                 if (connectionRetries.current >= MAX_CONNECTION_RETRIES) {
@@ -266,6 +271,7 @@ export function useWebRTC(callback, deps) {
                     setStatus("Waiting for initiator to connect...");
                 }
             } else {
+                isInitiator.current = true; // Ensure initiator role for empty room
                 cleanupPeerConnection();
                 connectionRetries.current = 0;
                 setStatus("Detecting peers...");
